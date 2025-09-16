@@ -130,7 +130,39 @@ class DataProcessor:
         # 변환 피처 생성
         X_train, X_test = self._create_transform_features(X_train, X_test)
         
+        # 전체 데이터에 대한 최종 NaN 및 무한값 처리
+        print("최종 데이터 검증 및 정리 중...")
+        X_train, X_test = self._final_data_cleanup(X_train, X_test)
+        
         return X_train, X_test, y_train
+    
+    def _final_data_cleanup(self, X_train, X_test):
+        """최종 데이터 정리"""
+        # 모든 컬럼에 대해 NaN 및 무한값 확인
+        print(f"정리 전 - 훈련 데이터 NaN 개수: {X_train.isna().sum().sum()}")
+        print(f"정리 전 - 테스트 데이터 NaN 개수: {X_test.isna().sum().sum()}")
+        
+        # 무한값을 NaN으로 변환
+        X_train = X_train.replace([np.inf, -np.inf], np.nan)
+        X_test = X_test.replace([np.inf, -np.inf], np.nan)
+        
+        # NaN 값 처리
+        for col in X_train.columns:
+            if X_train[col].isna().any():
+                # 중앙값으로 대체
+                median_val = X_train[col].median()
+                if pd.isna(median_val):
+                    # 중앙값도 NaN이면 0으로 대체
+                    median_val = 0
+                
+                X_train[col].fillna(median_val, inplace=True)
+                X_test[col].fillna(median_val, inplace=True)
+                print(f"{col} 컬럼 NaN 값을 {median_val}로 대체")
+        
+        print(f"정리 후 - 훈련 데이터 NaN 개수: {X_train.isna().sum().sum()}")
+        print(f"정리 후 - 테스트 데이터 NaN 개수: {X_test.isna().sum().sum()}")
+        
+        return X_train, X_test
     
     def _create_statistical_features(self, X_train, X_test):
         """통계적 피처 생성"""
@@ -151,11 +183,25 @@ class DataProcessor:
         X_test['feature_range'] = X_test['feature_max'] - X_test['feature_min']
         X_test['feature_median'] = X_test[self.feature_columns].median(axis=1)
         
+        # NaN 값 처리
+        stat_features = ['feature_mean', 'feature_std', 'feature_max', 'feature_min', 'feature_range', 'feature_median']
+        for feat in stat_features:
+            if X_train[feat].isna().any():
+                median_val = X_train[feat].median()
+                X_train[feat].fillna(median_val, inplace=True)
+                X_test[feat].fillna(median_val, inplace=True)
+        
         # 분위수 피처
         for q in [0.25, 0.75, 0.9, 0.1]:
             col_name = f'feature_q{int(q*100)}'
             X_train[col_name] = X_train[self.feature_columns].quantile(q, axis=1)
             X_test[col_name] = X_test[self.feature_columns].quantile(q, axis=1)
+            
+            # NaN 값 처리
+            if X_train[col_name].isna().any():
+                median_val = X_train[col_name].median()
+                X_train[col_name].fillna(median_val, inplace=True)
+                X_test[col_name].fillna(median_val, inplace=True)
         
         # 스케일별 통계
         if self.high_scale_features:
@@ -163,12 +209,26 @@ class DataProcessor:
             X_train['high_scale_std'] = X_train[self.high_scale_features].std(axis=1)
             X_test['high_scale_mean'] = X_test[self.high_scale_features].mean(axis=1)
             X_test['high_scale_std'] = X_test[self.high_scale_features].std(axis=1)
+            
+            # NaN 값 처리
+            for feat in ['high_scale_mean', 'high_scale_std']:
+                if X_train[feat].isna().any():
+                    median_val = X_train[feat].median()
+                    X_train[feat].fillna(median_val, inplace=True)
+                    X_test[feat].fillna(median_val, inplace=True)
         
         if self.low_scale_features:
             X_train['low_scale_mean'] = X_train[self.low_scale_features].mean(axis=1)
             X_train['low_scale_std'] = X_train[self.low_scale_features].std(axis=1)
             X_test['low_scale_mean'] = X_test[self.low_scale_features].mean(axis=1)
             X_test['low_scale_std'] = X_test[self.low_scale_features].std(axis=1)
+            
+            # NaN 값 처리
+            for feat in ['low_scale_mean', 'low_scale_std']:
+                if X_train[feat].isna().any():
+                    median_val = X_train[feat].median()
+                    X_train[feat].fillna(median_val, inplace=True)
+                    X_test[feat].fillna(median_val, inplace=True)
         
         return X_train, X_test
     
@@ -183,17 +243,42 @@ class DataProcessor:
                     feat1, feat2 = self.high_scale_features[i], self.high_scale_features[j]
                     ratio_name = f'ratio_{feat1}_{feat2}'
                     
-                    X_train[ratio_name] = X_train[feat1] / (X_train[feat2] + 1e-8)
-                    X_test[ratio_name] = X_test[feat1] / (X_test[feat2] + 1e-8)
+                    # 안전한 나눗셈
+                    denominator_train = X_train[feat2] + 1e-8
+                    denominator_test = X_test[feat2] + 1e-8
+                    
+                    X_train[ratio_name] = X_train[feat1] / denominator_train
+                    X_test[ratio_name] = X_test[feat1] / denominator_test
+                    
+                    # NaN 및 무한값 처리
+                    X_train[ratio_name] = X_train[ratio_name].replace([np.inf, -np.inf], np.nan)
+                    X_test[ratio_name] = X_test[ratio_name].replace([np.inf, -np.inf], np.nan)
+                    
+                    # NaN을 중앙값으로 대체
+                    median_val = X_train[ratio_name].median()
+                    X_train[ratio_name].fillna(median_val, inplace=True)
+                    X_test[ratio_name].fillna(median_val, inplace=True)
         
-        # 통계 기반 비율
-        X_train['max_mean_ratio'] = X_train['feature_max'] / (X_train['feature_mean'] + 1e-8)
-        X_train['range_mean_ratio'] = X_train['feature_range'] / (X_train['feature_mean'] + 1e-8)
-        X_train['std_mean_ratio'] = X_train['feature_std'] / (X_train['feature_mean'] + 1e-8)
+        # 통계 기반 비율 (안전한 나눗셈)
+        mean_safe = X_train['feature_mean'].abs() + 1e-8
+        X_train['max_mean_ratio'] = X_train['feature_max'] / mean_safe
+        X_train['range_mean_ratio'] = X_train['feature_range'] / mean_safe
+        X_train['std_mean_ratio'] = X_train['feature_std'] / mean_safe
         
-        X_test['max_mean_ratio'] = X_test['feature_max'] / (X_test['feature_mean'] + 1e-8)
-        X_test['range_mean_ratio'] = X_test['feature_range'] / (X_test['feature_mean'] + 1e-8)
-        X_test['std_mean_ratio'] = X_test['feature_std'] / (X_test['feature_mean'] + 1e-8)
+        mean_safe_test = X_test['feature_mean'].abs() + 1e-8
+        X_test['max_mean_ratio'] = X_test['feature_max'] / mean_safe_test
+        X_test['range_mean_ratio'] = X_test['feature_range'] / mean_safe_test
+        X_test['std_mean_ratio'] = X_test['feature_std'] / mean_safe_test
+        
+        # 모든 비율 피처에 대해 NaN 및 무한값 처리
+        ratio_features = ['max_mean_ratio', 'range_mean_ratio', 'std_mean_ratio']
+        for feat in ratio_features:
+            X_train[feat] = X_train[feat].replace([np.inf, -np.inf], np.nan)
+            X_test[feat] = X_test[feat].replace([np.inf, -np.inf], np.nan)
+            
+            median_val = X_train[feat].median()
+            X_train[feat].fillna(median_val, inplace=True)
+            X_test[feat].fillna(median_val, inplace=True)
         
         return X_train, X_test
     
@@ -225,12 +310,32 @@ class DataProcessor:
             if X_train[col].min() > 0:
                 X_train[f'{col}_log'] = np.log1p(X_train[col])
                 X_test[f'{col}_log'] = np.log1p(X_test[col])
+                
+                # NaN 및 무한값 처리
+                X_train[f'{col}_log'] = X_train[f'{col}_log'].replace([np.inf, -np.inf], np.nan)
+                X_test[f'{col}_log'] = X_test[f'{col}_log'].replace([np.inf, -np.inf], np.nan)
+                
+                # NaN을 중앙값으로 대체
+                if X_train[f'{col}_log'].isna().any():
+                    median_val = X_train[f'{col}_log'].median()
+                    X_train[f'{col}_log'].fillna(median_val, inplace=True)
+                    X_test[f'{col}_log'].fillna(median_val, inplace=True)
         
         # 제곱근 변환
         for col in self.feature_columns[:5]:
             if X_train[col].min() >= 0:
                 X_train[f'{col}_sqrt'] = np.sqrt(X_train[col])
                 X_test[f'{col}_sqrt'] = np.sqrt(X_test[col])
+                
+                # NaN 및 무한값 처리
+                X_train[f'{col}_sqrt'] = X_train[f'{col}_sqrt'].replace([np.inf, -np.inf], np.nan)
+                X_test[f'{col}_sqrt'] = X_test[f'{col}_sqrt'].replace([np.inf, -np.inf], np.nan)
+                
+                # NaN을 중앙값으로 대체
+                if X_train[f'{col}_sqrt'].isna().any():
+                    median_val = X_train[f'{col}_sqrt'].median()
+                    X_train[f'{col}_sqrt'].fillna(median_val, inplace=True)
+                    X_test[f'{col}_sqrt'].fillna(median_val, inplace=True)
         
         return X_train, X_test
     
@@ -265,10 +370,48 @@ class DataProcessor:
             index=X_test.index
         )
         
+        # 스케일링 후 NaN 값 처리
+        print(f"스케일링 후 - 훈련 데이터 NaN 개수: {X_train_scaled.isna().sum().sum()}")
+        print(f"스케일링 후 - 테스트 데이터 NaN 개수: {X_test_scaled.isna().sum().sum()}")
+        
+        # NaN 값이 있으면 처리
+        if X_train_scaled.isna().sum().sum() > 0 or X_test_scaled.isna().sum().sum() > 0:
+            print("스케일링 후 NaN 값 발견, 처리 중...")
+            X_train_scaled, X_test_scaled = self._handle_post_scaling_nan(X_train_scaled, X_test_scaled)
+        
         # 스케일러 저장
         save_joblib(self.scaler, Config.SCALER_FILE)
         
         return X_train_scaled, X_test_scaled
+    
+    def _handle_post_scaling_nan(self, X_train, X_test):
+        """스케일링 후 NaN 값 처리"""
+        from sklearn.impute import SimpleImputer
+        
+        print("SimpleImputer를 사용한 NaN 값 처리 중...")
+        
+        # 중앙값 기반 imputer 사용
+        imputer = SimpleImputer(strategy='median')
+        
+        X_train_imputed = imputer.fit_transform(X_train)
+        X_test_imputed = imputer.transform(X_test)
+        
+        # DataFrame으로 다시 변환
+        X_train = pd.DataFrame(
+            X_train_imputed,
+            columns=X_train.columns,
+            index=X_train.index
+        )
+        X_test = pd.DataFrame(
+            X_test_imputed,
+            columns=X_test.columns,
+            index=X_test.index
+        )
+        
+        print(f"Imputer 적용 후 - 훈련 데이터 NaN 개수: {X_train.isna().sum().sum()}")
+        print(f"Imputer 적용 후 - 테스트 데이터 NaN 개수: {X_test.isna().sum().sum()}")
+        
+        return X_train, X_test
     
     @timer
     def select_features(self, X_train, X_test, y_train, method='mutual_info', k=None):
@@ -278,6 +421,10 @@ class DataProcessor:
         
         print(f"=== 피처 선택 시작 ({method}, k={k}) ===")
         print(f"원본 피처 개수: {X_train.shape[1]}")
+        
+        # 피처 선택 전 강력한 NaN 값 처리
+        print("피처 선택 전 최종 NaN 값 검증...")
+        X_train, X_test = self._ensure_no_nan(X_train, X_test)
         
         if method == 'mutual_info':
             self.feature_selector = SelectKBest(mutual_info_classif, k=k)
@@ -352,6 +499,48 @@ class DataProcessor:
         save_joblib(self.feature_selector, Config.FEATURE_SELECTOR_FILE)
         
         return X_train_selected, X_test_selected
+    
+    def _ensure_no_nan(self, X_train, X_test):
+        """NaN 값 완전 제거 보장"""
+        from sklearn.impute import SimpleImputer
+        
+        nan_count_train = X_train.isna().sum().sum()
+        nan_count_test = X_test.isna().sum().sum()
+        
+        print(f"검증 중 - 훈련 데이터 NaN 개수: {nan_count_train}")
+        print(f"검증 중 - 테스트 데이터 NaN 개수: {nan_count_test}")
+        
+        if nan_count_train > 0 or nan_count_test > 0:
+            print("NaN 값 발견, SimpleImputer로 강제 처리...")
+            
+            # 상수 전략으로 0 채우기
+            imputer = SimpleImputer(strategy='constant', fill_value=0)
+            
+            X_train_clean = imputer.fit_transform(X_train)
+            X_test_clean = imputer.transform(X_test)
+            
+            # DataFrame으로 변환
+            X_train = pd.DataFrame(
+                X_train_clean,
+                columns=X_train.columns,
+                index=X_train.index
+            )
+            X_test = pd.DataFrame(
+                X_test_clean,
+                columns=X_test.columns,
+                index=X_test.index
+            )
+            
+            print(f"처리 후 - 훈련 데이터 NaN 개수: {X_train.isna().sum().sum()}")
+            print(f"처리 후 - 테스트 데이터 NaN 개수: {X_test.isna().sum().sum()}")
+        
+        # 무한값도 제거
+        X_train = X_train.replace([np.inf, -np.inf], 0)
+        X_test = X_test.replace([np.inf, -np.inf], 0)
+        
+        print("NaN 및 무한값 처리 완료")
+        
+        return X_train, X_test
     
     def _select_features_rf(self, X_train, X_test, y_train, k):
         """Random Forest 기반 피처 선택"""
@@ -530,7 +719,11 @@ class DataProcessor:
         # 3. 스케일링
         X_train, X_test = self.scale_features(X_train, X_test, method='robust')
         
-        # 4. 피처 선택
+        # 4. 스케일링 후 추가 안전 체크
+        print("스케일링 후 추가 안전 체크...")
+        X_train, X_test = self._ensure_no_nan(X_train, X_test)
+        
+        # 5. 피처 선택
         if use_feature_selection:
             X_train, X_test = self.select_features(
                 X_train, X_test, y_train, 
@@ -538,17 +731,35 @@ class DataProcessor:
                 k=Config.FEATURE_SELECTION_K
             )
         
-        # 5. PCA
+        # 6. PCA
         if use_pca:
             X_train_pca, X_test_pca = self.apply_pca(X_train, X_test)
             X_train = X_train_pca
             X_test = X_test_pca
         
-        # 6. SVD
+        # 7. SVD
         if use_svd:
             X_train_svd, X_test_svd = self.apply_svd(X_train, X_test)
             X_train = pd.concat([X_train, X_train_svd], axis=1)
             X_test = pd.concat([X_test, X_test_svd], axis=1)
+        
+        # 8. 최종 검증
+        print("=== 최종 데이터 검증 ===")
+        final_nan_train = X_train.isna().sum().sum()
+        final_nan_test = X_test.isna().sum().sum()
+        final_inf_train = np.isinf(X_train.select_dtypes(include=[np.number])).sum().sum()
+        final_inf_test = np.isinf(X_test.select_dtypes(include=[np.number])).sum().sum()
+        
+        print(f"최종 훈련 데이터 NaN 개수: {final_nan_train}")
+        print(f"최종 테스트 데이터 NaN 개수: {final_nan_test}")
+        print(f"최종 훈련 데이터 무한값 개수: {final_inf_train}")
+        print(f"최종 테스트 데이터 무한값 개수: {final_inf_test}")
+        
+        if final_nan_train > 0 or final_nan_test > 0 or final_inf_train > 0 or final_inf_test > 0:
+            print("최종 단계에서 문제 값 발견, 강제 정리...")
+            X_train = X_train.replace([np.inf, -np.inf, np.nan], 0)
+            X_test = X_test.replace([np.inf, -np.inf, np.nan], 0)
+            print("모든 문제 값을 0으로 대체 완료")
         
         print("=== 전처리 완료 ===")
         print(f"최종 피처 개수: {X_train.shape[1]}")

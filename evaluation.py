@@ -351,7 +351,7 @@ class ModelEvaluator:
     def save_evaluation_results(self, output_dir=None):
         """평가 결과 저장"""
         if output_dir is None:
-            output_dir = Config.OUTPUT_DIR
+            output_dir = Config.MODEL_DIR
         
         # 모든 평가 결과를 CSV로 저장
         all_results = []

@@ -7,7 +7,6 @@ class Config:
     # 경로 설정
     BASE_DIR = Path(__file__).parent
     DATA_DIR = BASE_DIR / "data"
-    OUTPUT_DIR = BASE_DIR / "output"
     MODEL_DIR = BASE_DIR / "models"
     LOG_DIR = BASE_DIR / "logs"
     
@@ -17,13 +16,13 @@ class Config:
     SUBMISSION_FILE = DATA_DIR / "sample_submission.csv"
     
     # 출력 파일
-    RESULT_FILE = OUTPUT_DIR / "submission.csv"
+    RESULT_FILE = BASE_DIR / "submission.csv"
     MODEL_FILE = MODEL_DIR / "best_model.pkl"
     SCALER_FILE = MODEL_DIR / "scaler.pkl"
     FEATURE_SELECTOR_FILE = MODEL_DIR / "feature_selector.pkl"
     PCA_FILE = MODEL_DIR / "pca.pkl"
-    CV_RESULTS_FILE = OUTPUT_DIR / "cv_results.csv"
-    FEATURE_IMPORTANCE_FILE = OUTPUT_DIR / "feature_importance.csv"
+    CV_RESULTS_FILE = MODEL_DIR / "cv_results.csv"
+    FEATURE_IMPORTANCE_FILE = MODEL_DIR / "feature_importance.csv"
     
     # 데이터 설정
     FEATURE_COLUMNS = [f'X_{i:02d}' for i in range(1, 53)]
@@ -114,7 +113,7 @@ class Config:
     @classmethod
     def create_directories(cls):
         """디렉터리 생성"""
-        for directory in [cls.OUTPUT_DIR, cls.MODEL_DIR, cls.LOG_DIR]:
+        for directory in [cls.MODEL_DIR, cls.LOG_DIR]:
             directory.mkdir(parents=True, exist_ok=True)
     
     @classmethod
