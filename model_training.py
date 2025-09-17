@@ -72,21 +72,24 @@ class ModelTraining:
         else:
             params = params.copy()
         
+        # early stopping 파라미터 제거
+        early_stopping_rounds = params.pop('early_stopping_rounds', None)
+        
         # validation 데이터가 있을 때만 early stopping 사용
-        if X_val is not None and y_val is not None:
+        if X_val is not None and y_val is not None and early_stopping_rounds:
             eval_set = [(X_val, y_val)]
-            early_stopping_rounds = params.pop('early_stopping_rounds', 100)
+            
+            # early stopping callback 생성
+            callbacks = [xgb.callback.EarlyStopping(rounds=early_stopping_rounds)]
             
             model = xgb.XGBClassifier(**params)
             model.fit(
                 X_train, y_train, 
-                eval_set=eval_set, 
-                early_stopping_rounds=early_stopping_rounds,
+                eval_set=eval_set,
+                callbacks=callbacks,
                 verbose=False
             )
         else:
-            # validation 데이터가 없으면 early stopping 파라미터 제거
-            params.pop('early_stopping_rounds', None)
             model = xgb.XGBClassifier(**params)
             model.fit(X_train, y_train)
         
