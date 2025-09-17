@@ -8,7 +8,7 @@ warnings.filterwarnings('ignore')
 from config import Config
 from data_processor import DataProcessor
 from model_trainer import ModelTrainer
-from predictor import Predictor
+from prediction import Predictor
 from utils import setup_logging, memory_usage_check
 
 def main():
