@@ -34,25 +34,27 @@ class ModelTraining:
         print("=== LightGBM 모델 훈련 시작 ===")
         
         if params is None:
-            params = Config.LGBM_PARAMS
+            params = Config.LGBM_PARAMS.copy()
+        else:
+            params = params.copy()
         
-        if X_val is not None:
+        # validation 데이터가 있을 때만 early stopping 사용
+        if X_val is not None and y_val is not None:
             eval_set = [(X_val, y_val)]
             eval_names = ['validation']
-        else:
-            eval_set = None
-            eval_names = None
-        
-        model = lgb.LGBMClassifier(**params)
-        
-        if eval_set:
+            early_stopping_rounds = params.pop('early_stopping_rounds', 100)
+            
+            model = lgb.LGBMClassifier(**params)
             model.fit(
                 X_train, y_train, 
                 eval_set=eval_set, 
                 eval_names=eval_names, 
-                callbacks=[lgb.early_stopping(params.get('early_stopping_rounds', 100))]
+                callbacks=[lgb.early_stopping(early_stopping_rounds)]
             )
         else:
+            # validation 데이터가 없으면 early stopping 파라미터 제거
+            params.pop('early_stopping_rounds', None)
+            model = lgb.LGBMClassifier(**params)
             model.fit(X_train, y_train)
         
         self.models['lightgbm'] = model
@@ -66,22 +68,26 @@ class ModelTraining:
         print("=== XGBoost 모델 훈련 시작 ===")
         
         if params is None:
-            params = Config.XGB_PARAMS
-        
-        if X_val is not None:
-            eval_set = [(X_val, y_val)]
+            params = Config.XGB_PARAMS.copy()
         else:
-            eval_set = None
+            params = params.copy()
         
-        model = xgb.XGBClassifier(**params)
-        
-        if eval_set:
+        # validation 데이터가 있을 때만 early stopping 사용
+        if X_val is not None and y_val is not None:
+            eval_set = [(X_val, y_val)]
+            early_stopping_rounds = params.pop('early_stopping_rounds', 100)
+            
+            model = xgb.XGBClassifier(**params)
             model.fit(
                 X_train, y_train, 
                 eval_set=eval_set, 
+                early_stopping_rounds=early_stopping_rounds,
                 verbose=False
             )
         else:
+            # validation 데이터가 없으면 early stopping 파라미터 제거
+            params.pop('early_stopping_rounds', None)
+            model = xgb.XGBClassifier(**params)
             model.fit(X_train, y_train)
         
         self.models['xgboost'] = model
@@ -366,6 +372,52 @@ class ModelTraining:
         
         return self.cv_scores
     
+    def _prepare_ensemble_estimators(self, estimator_list):
+        """앙상블용 모델 파라미터 정리"""
+        cleaned_estimators = []
+        
+        for name, model in estimator_list:
+            # 모델을 복사하여 파라미터 정리
+            if hasattr(model, 'get_params'):
+                params = model.get_params()
+                
+                # early stopping 관련 파라미터 제거
+                early_stopping_params = ['early_stopping_rounds', 'early_stopping_round']
+                for param in early_stopping_params:
+                    params.pop(param, None)
+                
+                # 새로운 모델 인스턴스 생성
+                model_class = type(model)
+                try:
+                    new_model = model_class(**params)
+                    cleaned_estimators.append((name, new_model))
+                except Exception as e:
+                    print(f"{name} 모델 파라미터 정리 중 오류: {e}")
+                    # 기본 파라미터로 모델 생성
+                    if 'lgb' in str(model_class):
+                        new_model = lgb.LGBMClassifier(
+                            objective='multiclass',
+                            num_class=Config.N_CLASSES,
+                            random_state=Config.RANDOM_STATE,
+                            n_jobs=Config.N_JOBS,
+                            verbose=-1
+                        )
+                    elif 'xgb' in str(model_class):
+                        new_model = xgb.XGBClassifier(
+                            objective='multi:softprob',
+                            num_class=Config.N_CLASSES,
+                            random_state=Config.RANDOM_STATE,
+                            n_jobs=Config.N_JOBS,
+                            tree_method='hist'
+                        )
+                    else:
+                        new_model = model_class(random_state=Config.RANDOM_STATE)
+                    cleaned_estimators.append((name, new_model))
+            else:
+                cleaned_estimators.append((name, model))
+        
+        return cleaned_estimators
+    
     @timer
     def create_voting_ensemble(self, X_train, y_train, estimator_list=None):
         """투표 기반 앙상블 생성"""
@@ -379,13 +431,20 @@ class ModelTraining:
             
             estimator_list = list(self.models.items())
         
+        # 앙상블용 모델 파라미터 정리
+        cleaned_estimators = self._prepare_ensemble_estimators(estimator_list)
+        
+        if len(cleaned_estimators) < 2:
+            print("유효한 모델이 부족하여 앙상블을 생성할 수 없습니다.")
+            return None
+        
         # Hard voting과 Soft voting 모두 시도
         voting_classifiers = {}
         
         # Hard voting
         try:
             hard_voting = VotingClassifier(
-                estimators=estimator_list, 
+                estimators=cleaned_estimators, 
                 voting='hard',
                 n_jobs=Config.N_JOBS
             )
@@ -398,7 +457,7 @@ class ModelTraining:
         # Soft voting
         try:
             soft_voting = VotingClassifier(
-                estimators=estimator_list, 
+                estimators=cleaned_estimators, 
                 voting='soft',
                 n_jobs=Config.N_JOBS
             )
@@ -425,11 +484,14 @@ class ModelTraining:
             
             # 투표 기반 앙상블 제외
             base_estimators = [(name, model) for name, model in self.models.items() 
-                             if 'voting' not in name and 'stacking' not in name]
+                             if 'voting' not in name and 'stacking' not in name and 'bagging' not in name]
         
         if len(base_estimators) < 2:
             print("스태킹을 위해 최소 2개의 기본 모델이 필요합니다.")
             return None
+        
+        # 스태킹용 모델 파라미터 정리
+        cleaned_estimators = self._prepare_ensemble_estimators(base_estimators)
         
         # 메타 학습기 선택
         meta_classifier = LogisticRegression(
@@ -438,19 +500,23 @@ class ModelTraining:
             n_jobs=Config.N_JOBS
         )
         
-        stacking_ensemble = StackingClassifier(
-            estimators=base_estimators,
-            final_estimator=meta_classifier,
-            cv=Config.STACKING_CV,
-            n_jobs=Config.N_JOBS,
-            passthrough=False
-        )
-        
-        stacking_ensemble.fit(X_train, y_train)
-        self.models['stacking'] = stacking_ensemble
-        
-        print("스태킹 앙상블 생성 완료")
-        return stacking_ensemble
+        try:
+            stacking_ensemble = StackingClassifier(
+                estimators=cleaned_estimators,
+                final_estimator=meta_classifier,
+                cv=Config.STACKING_CV,
+                n_jobs=Config.N_JOBS,
+                passthrough=False
+            )
+            
+            stacking_ensemble.fit(X_train, y_train)
+            self.models['stacking'] = stacking_ensemble
+            
+            print("스태킹 앙상블 생성 완료")
+            return stacking_ensemble
+        except Exception as e:
+            print(f"스태킹 앙상블 생성 실패: {e}")
+            return None
     
     @timer
     def create_bagging_ensemble(self, X_train, y_train):
@@ -460,13 +526,13 @@ class ModelTraining:
         # 다양한 기본 모델로 배깅 앙상블 생성
         base_models = [
             ('rf_bagging', BaggingClassifier(
-                base_estimator=RandomForestClassifier(n_estimators=50, random_state=Config.RANDOM_STATE),
+                estimator=RandomForestClassifier(n_estimators=50, random_state=Config.RANDOM_STATE),
                 n_estimators=10,
                 random_state=Config.RANDOM_STATE,
                 n_jobs=Config.N_JOBS
             )),
             ('et_bagging', BaggingClassifier(
-                base_estimator=ExtraTreesClassifier(n_estimators=50, random_state=Config.RANDOM_STATE),
+                estimator=ExtraTreesClassifier(n_estimators=50, random_state=Config.RANDOM_STATE),
                 n_estimators=10,
                 random_state=Config.RANDOM_STATE,
                 n_jobs=Config.N_JOBS
@@ -474,9 +540,12 @@ class ModelTraining:
         ]
         
         for name, model in base_models:
-            model.fit(X_train, y_train)
-            self.models[name] = model
-            print(f"{name} 생성 완료")
+            try:
+                model.fit(X_train, y_train)
+                self.models[name] = model
+                print(f"{name} 생성 완료")
+            except Exception as e:
+                print(f"{name} 생성 실패: {e}")
         
         return base_models
     

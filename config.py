@@ -57,7 +57,6 @@ class Config:
         'verbose': -1,
         'random_state': RANDOM_STATE,
         'n_estimators': 1000,
-        'early_stopping_rounds': 100,
         'n_jobs': N_JOBS
     }
     
@@ -73,7 +72,6 @@ class Config:
         'reg_lambda': 0.1,
         'random_state': RANDOM_STATE,
         'n_estimators': 1000,
-        'early_stopping_rounds': 100,
         'n_jobs': N_JOBS,
         'tree_method': 'hist'
     }
@@ -129,7 +127,7 @@ class Config:
     
     @classmethod
     def update_params(cls, model_name, new_params):
-        """모델 파라미터 업데이트"""
+        """모델 파라미터 수정"""
         if model_name == 'lightgbm':
             cls.LGBM_PARAMS.update(new_params)
         elif model_name == 'xgboost':
