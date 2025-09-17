@@ -1,4 +1,4 @@
-# model_trainer.py
+# model_training.py
 
 import pandas as pd
 import numpy as np
@@ -19,7 +19,7 @@ warnings.filterwarnings('ignore')
 from config import Config
 from utils import timer, calculate_macro_f1, print_classification_metrics, save_model, save_joblib, setup_logging
 
-class ModelTrainer:
+class ModelTraining:
     def __init__(self):
         self.models = {}
         self.best_model = None

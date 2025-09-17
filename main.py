@@ -7,8 +7,8 @@ warnings.filterwarnings('ignore')
 
 from config import Config
 from data_processor import DataProcessor
-from model_trainer import ModelTrainer
-from prediction import Predictor
+from model_training import ModelTraining
+from prediction import Prediction
 from utils import setup_logging, memory_usage_check
 
 def main():
@@ -49,7 +49,7 @@ def main():
         print("2단계: 모델 훈련")
         print("=" * 50)
         
-        trainer = ModelTrainer()
+        trainer = ModelTraining()
         
         # 검증 데이터 분할
         from sklearn.model_selection import train_test_split
@@ -75,7 +75,7 @@ def main():
         print(f"최고 성능 모델: {type(best_model).__name__}")
         
         # 검증 세트 평가
-        predictor_val = Predictor(best_model)
+        predictor_val = Prediction(best_model)
         val_predictions = predictor_val.predict(X_val)
         val_metrics = predictor_val.validate_predictions(y_val)
         
@@ -87,7 +87,7 @@ def main():
         print("3단계: 테스트 예측")
         print("=" * 50)
         
-        predictor = Predictor(best_model)
+        predictor = Prediction(best_model)
         
         # 단일 모델 예측
         test_predictions = predictor.predict(X_test)
@@ -184,7 +184,7 @@ def run_prediction_only():
         )
         
         # 훈련된 모델 로드
-        predictor = Predictor()
+        predictor = Prediction()
         predictor.load_trained_model()
         
         # 예측 수행
@@ -228,7 +228,7 @@ def run_hyperparameter_optimization():
         )
         
         # 모델 훈련 (최적화 포함)
-        trainer = ModelTrainer()
+        trainer = ModelTraining()
         models, best_model = trainer.train_all_models(
             X_train_split, y_train_split,
             X_val, y_val,
@@ -271,7 +271,7 @@ def run_ensemble_experiment():
         )
         
         # 모델 훈련
-        trainer = ModelTrainer()
+        trainer = ModelTraining()
         models, best_model = trainer.train_all_models(
             X_train_split, y_train_split,
             X_val, y_val,
@@ -280,7 +280,7 @@ def run_ensemble_experiment():
         )
         
         # 다양한 앙상블 방법 실험
-        predictor = Predictor()
+        predictor = Prediction()
         
         ensemble_methods = ['weighted_average', 'majority_vote', 'rank_average']
         ensemble_results = {}

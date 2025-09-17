@@ -1,4 +1,4 @@
-# predictor.py
+# prediction.py
 
 import pandas as pd
 import numpy as np
@@ -9,7 +9,7 @@ warnings.filterwarnings('ignore')
 from config import Config
 from utils import timer, load_model, calculate_macro_f1, validate_predictions, create_submission_template
 
-class Predictor:
+class Prediction:
     def __init__(self, model=None):
         self.model = model
         self.predictions = None
