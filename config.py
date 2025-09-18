@@ -79,8 +79,7 @@ class Config:
         'random_state': RANDOM_STATE,
         'n_estimators': 600,
         'n_jobs': N_JOBS,
-        'tree_method': 'hist',
-        'early_stopping_rounds': 50
+        'tree_method': 'hist'
     }
     
     RF_PARAMS = {
@@ -120,11 +119,10 @@ class Config:
         'verbose': False,
         'auto_class_weights': 'Balanced',
         'thread_count': N_JOBS if N_JOBS > 0 else None,
-        'task_type': 'CPU',
-        'early_stopping_rounds': 50
+        'task_type': 'CPU'
     }
     
-    # 하이퍼파라미터 최적화 설정
+    # 하이퍼파라미터 튜닝 설정
     OPTUNA_TRIALS = 300
     OPTUNA_TIMEOUT = 1800
     

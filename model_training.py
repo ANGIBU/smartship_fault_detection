@@ -84,25 +84,22 @@ class ModelTraining:
         weight_dict = dict(zip(classes, class_weights))
         sample_weights = np.array([weight_dict[y] for y in y_train])
         
-        # Early stopping 처리
-        callbacks = []
+        # Early stopping 처리 - 생성자에서 설정
         early_stopping_rounds = params.pop('early_stopping_rounds', 50)
+        
         if X_val is not None and y_val is not None:
-            eval_set = [(X_val, y_val)]
-            callbacks = [xgb.callback.EarlyStopping(rounds=early_stopping_rounds)]
-        else:
-            eval_set = None
-        
-        model = xgb.XGBClassifier(**params)
-        
-        if eval_set:
+            # early_stopping_rounds를 생성자에 추가
+            params['early_stopping_rounds'] = early_stopping_rounds
+            
+            model = xgb.XGBClassifier(**params)
             model.fit(
                 X_train, y_train, 
                 sample_weight=sample_weights,
-                eval_set=eval_set,
-                callbacks=callbacks
+                eval_set=[(X_val, y_val)]
             )
         else:
+            # validation이 없으면 early_stopping 없이 훈련
+            model = xgb.XGBClassifier(**params)
             model.fit(X_train, y_train, sample_weight=sample_weights)
         
         self.models['xgboost'] = model

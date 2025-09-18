@@ -1,55 +1,55 @@
 # requirements.txt
 
 # 데이터 처리 및 분석
-pandas>=2.0.0
-numpy>=1.24.0
+pandas>=1.5.0,<3.0.0
+numpy>=1.21.0,<2.0.0
 
 # 머신러닝 핵심
-scikit-learn>=1.3.0
-lightgbm>=4.0.0
-xgboost>=2.0.0
+scikit-learn>=1.1.0,<1.5.0
+lightgbm>=3.3.0,<5.0.0
+xgboost>=1.6.0,<3.0.0
 
-# 하이퍼파라미터 최적화
-optuna>=3.4.0
+# 하이퍼파라미터 튜닝
+optuna>=3.1.0,<4.0.0
 hyperopt>=0.2.7
 
 # 설명 가능한 AI
-shap>=0.43.0
+shap>=0.41.0
 
 # 추가 머신러닝 라이브러리
-catboost>=1.2.0
-imbalanced-learn>=0.11.0
+catboost>=1.1.0,<2.0.0
+imbalanced-learn>=0.9.0
 
-# 시각화 (선택적)
-matplotlib>=3.7.0
-seaborn>=0.12.0
-plotly>=5.17.0
+# 시각화
+matplotlib>=3.5.0
+seaborn>=0.11.0
+plotly>=5.10.0
 
 # 시스템 모니터링
-psutil>=5.9.0
-memory-profiler>=0.61.0
+psutil>=5.8.0
+memory-profiler>=0.60.0
 
 # 유틸리티
-joblib>=1.3.0
-tqdm>=4.65.0
-click>=8.1.0
+joblib>=1.1.0
+tqdm>=4.60.0
+click>=8.0.0
 
 # 데이터 검증
-cerberus>=1.3.4
-great-expectations>=0.17.0
+cerberus>=1.3.0
+great-expectations>=0.15.0
 
-# 성능 최적화
-numba>=0.58.0
-bottleneck>=1.3.5
+# 성능 가속화
+numba>=0.56.0
+bottleneck>=1.3.0
 
-# 실험 추적 (선택적)
-mlflow>=2.7.0
-wandb>=0.15.0
+# 실험 추적
+mlflow>=2.0.0
+wandb>=0.13.0
 
 # 통계 분석
-scipy>=1.11.0
-statsmodels>=0.14.0
+scipy>=1.8.0
+statsmodels>=0.13.0
 
-# 고급 전처리
-feature-engine>=1.6.0
-category-encoders>=2.6.0
+# 전처리 도구
+feature-engine>=1.5.0
+category-encoders>=2.5.0
