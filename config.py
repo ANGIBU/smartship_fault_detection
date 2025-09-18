@@ -39,7 +39,7 @@ class Config:
     VALIDATION_SIZE = 0.2
     
     # 피처 선택 설정
-    FEATURE_SELECTION_K = 40
+    FEATURE_SELECTION_K = 50
     PCA_COMPONENTS = 0.95
     
     # 모델 파라미터
@@ -48,60 +48,65 @@ class Config:
         'num_class': N_CLASSES,
         'metric': 'multi_logloss',
         'boosting_type': 'gbdt',
-        'num_leaves': 31,
-        'learning_rate': 0.05,
-        'feature_fraction': 0.9,
-        'bagging_fraction': 0.8,
+        'num_leaves': 100,
+        'learning_rate': 0.08,
+        'feature_fraction': 0.85,
+        'bagging_fraction': 0.85,
         'bagging_freq': 5,
-        'min_child_samples': 20,
+        'min_child_samples': 10,
+        'reg_alpha': 0.1,
+        'reg_lambda': 0.1,
         'verbose': -1,
         'random_state': RANDOM_STATE,
-        'n_estimators': 1000,
-        'n_jobs': N_JOBS
+        'n_estimators': 800,
+        'n_jobs': N_JOBS,
+        'early_stopping_rounds': 100
     }
     
     XGB_PARAMS = {
         'objective': 'multi:softprob',
         'num_class': N_CLASSES,
         'eval_metric': 'mlogloss',
-        'learning_rate': 0.05,
-        'max_depth': 6,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
+        'learning_rate': 0.08,
+        'max_depth': 8,
+        'subsample': 0.85,
+        'colsample_bytree': 0.85,
         'reg_alpha': 0.1,
         'reg_lambda': 0.1,
+        'gamma': 0.1,
         'random_state': RANDOM_STATE,
-        'n_estimators': 1000,
+        'n_estimators': 800,
         'n_jobs': N_JOBS,
-        'tree_method': 'hist'
+        'tree_method': 'hist',
+        'early_stopping_rounds': 100
     }
     
     RF_PARAMS = {
-        'n_estimators': 500,
-        'max_depth': 15,
-        'min_samples_split': 5,
-        'min_samples_leaf': 2,
+        'n_estimators': 300,
+        'max_depth': 20,
+        'min_samples_split': 3,
+        'min_samples_leaf': 1,
         'max_features': 'sqrt',
         'random_state': RANDOM_STATE,
         'n_jobs': N_JOBS
     }
     
     ET_PARAMS = {
-        'n_estimators': 500,
-        'max_depth': 15,
-        'min_samples_split': 5,
-        'min_samples_leaf': 2,
+        'n_estimators': 300,
+        'max_depth': 20,
+        'min_samples_split': 3,
+        'min_samples_leaf': 1,
         'max_features': 'sqrt',
         'random_state': RANDOM_STATE,
         'n_jobs': N_JOBS
     }
     
     # 하이퍼파라미터 최적화 설정
-    OPTUNA_TRIALS = 100
-    OPTUNA_TIMEOUT = 3600
+    OPTUNA_TRIALS = 300
+    OPTUNA_TIMEOUT = 1800
     
     # 앙상블 설정
-    ENSEMBLE_METHODS = ['voting', 'stacking']
+    ENSEMBLE_METHODS = ['voting']
     STACKING_CV = 3
     
     # 로깅 설정
