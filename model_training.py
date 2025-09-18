@@ -89,7 +89,7 @@ class ModelTraining:
         early_stopping_rounds = params.pop('early_stopping_rounds', 50)
         if X_val is not None and y_val is not None:
             eval_set = [(X_val, y_val)]
-            callbacks = [xgb.callback.EarlyStopping(rounds=early_stopping_rounds, verbose=False)]
+            callbacks = [xgb.callback.EarlyStopping(rounds=early_stopping_rounds)]
         else:
             eval_set = None
         
@@ -100,8 +100,7 @@ class ModelTraining:
                 X_train, y_train, 
                 sample_weight=sample_weights,
                 eval_set=eval_set,
-                callbacks=callbacks,
-                verbose=False
+                callbacks=callbacks
             )
         else:
             model.fit(X_train, y_train, sample_weight=sample_weights)
@@ -240,7 +239,7 @@ class ModelTraining:
                     sw_tr = sample_weights[train_idx]
                     
                     model_copy = xgb.XGBClassifier(**params)
-                    model_copy.fit(X_tr, y_tr, sample_weight=sw_tr, verbose=False)
+                    model_copy.fit(X_tr, y_tr, sample_weight=sw_tr)
                     y_pred = model_copy.predict(X_val)
                     score = f1_score(y_val, y_pred, average='macro')
                     cv_scores.append(score)
@@ -290,7 +289,7 @@ class ModelTraining:
                     
                     # 모델 복사 및 훈련
                     model_copy = xgb.XGBClassifier(**model.get_params())
-                    model_copy.fit(X_tr, y_tr, sample_weight=sample_weights, verbose=False)
+                    model_copy.fit(X_tr, y_tr, sample_weight=sample_weights)
                     
                     y_pred = model_copy.predict(X_val)
                     score = f1_score(y_val, y_pred, average='macro')
