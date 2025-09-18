@@ -39,7 +39,7 @@ class Config:
     VALIDATION_SIZE = 0.2
     
     # 피처 선택 설정
-    FEATURE_SELECTION_K = 50
+    FEATURE_SELECTION_K = 60
     PCA_COMPONENTS = 0.95
     
     # 모델 파라미터
@@ -48,57 +48,80 @@ class Config:
         'num_class': N_CLASSES,
         'metric': 'multi_logloss',
         'boosting_type': 'gbdt',
-        'num_leaves': 100,
-        'learning_rate': 0.08,
-        'feature_fraction': 0.85,
-        'bagging_fraction': 0.85,
+        'num_leaves': 120,
+        'learning_rate': 0.1,
+        'feature_fraction': 0.8,
+        'bagging_fraction': 0.8,
         'bagging_freq': 5,
-        'min_child_samples': 10,
-        'reg_alpha': 0.1,
-        'reg_lambda': 0.1,
+        'min_child_samples': 15,
+        'reg_alpha': 0.3,
+        'reg_lambda': 0.3,
         'verbose': -1,
         'random_state': RANDOM_STATE,
-        'n_estimators': 800,
+        'n_estimators': 600,
         'n_jobs': N_JOBS,
-        'early_stopping_rounds': 100
+        'early_stopping_rounds': 50,
+        'class_weight': 'balanced',
+        'is_unbalance': True
     }
     
     XGB_PARAMS = {
         'objective': 'multi:softprob',
         'num_class': N_CLASSES,
         'eval_metric': 'mlogloss',
-        'learning_rate': 0.08,
-        'max_depth': 8,
-        'subsample': 0.85,
-        'colsample_bytree': 0.85,
-        'reg_alpha': 0.1,
-        'reg_lambda': 0.1,
-        'gamma': 0.1,
+        'learning_rate': 0.1,
+        'max_depth': 9,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'reg_alpha': 0.3,
+        'reg_lambda': 0.3,
+        'gamma': 0.2,
         'random_state': RANDOM_STATE,
-        'n_estimators': 800,
+        'n_estimators': 600,
         'n_jobs': N_JOBS,
         'tree_method': 'hist',
-        'early_stopping_rounds': 100
+        'early_stopping_rounds': 50
     }
     
     RF_PARAMS = {
-        'n_estimators': 300,
-        'max_depth': 20,
-        'min_samples_split': 3,
+        'n_estimators': 400,
+        'max_depth': 25,
+        'min_samples_split': 2,
         'min_samples_leaf': 1,
         'max_features': 'sqrt',
         'random_state': RANDOM_STATE,
-        'n_jobs': N_JOBS
+        'n_jobs': N_JOBS,
+        'class_weight': 'balanced'
     }
     
     ET_PARAMS = {
-        'n_estimators': 300,
-        'max_depth': 20,
-        'min_samples_split': 3,
+        'n_estimators': 400,
+        'max_depth': 25,
+        'min_samples_split': 2,
         'min_samples_leaf': 1,
         'max_features': 'sqrt',
         'random_state': RANDOM_STATE,
-        'n_jobs': N_JOBS
+        'n_jobs': N_JOBS,
+        'class_weight': 'balanced'
+    }
+    
+    # CatBoost 파라미터
+    CATBOOST_PARAMS = {
+        'iterations': 600,
+        'learning_rate': 0.1,
+        'depth': 8,
+        'l2_leaf_reg': 3,
+        'bootstrap_type': 'Bayesian',
+        'bagging_temperature': 1,
+        'subsample': 0.8,
+        'sampling_frequency': 'PerTree',
+        'colsample_bylevel': 0.8,
+        'random_seed': RANDOM_STATE,
+        'verbose': False,
+        'auto_class_weights': 'Balanced',
+        'thread_count': N_JOBS if N_JOBS > 0 else None,
+        'task_type': 'CPU',
+        'early_stopping_rounds': 50
     }
     
     # 하이퍼파라미터 최적화 설정
@@ -113,6 +136,10 @@ class Config:
     LOG_LEVEL = 'INFO'
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     
+    # 실행 모드 설정
+    FAST_MODE_MODELS = ['lightgbm', 'xgboost']
+    FULL_MODE_MODELS = ['lightgbm', 'xgboost', 'catboost', 'random_forest']
+    
     @classmethod
     def create_directories(cls):
         """디렉터리 생성"""
@@ -126,7 +153,8 @@ class Config:
             'lightgbm': cls.LGBM_PARAMS,
             'xgboost': cls.XGB_PARAMS,
             'random_forest': cls.RF_PARAMS,
-            'extra_trees': cls.ET_PARAMS
+            'extra_trees': cls.ET_PARAMS,
+            'catboost': cls.CATBOOST_PARAMS
         }
         return params_map.get(model_name, {})
     
@@ -141,3 +169,29 @@ class Config:
             cls.RF_PARAMS.update(new_params)
         elif model_name == 'extra_trees':
             cls.ET_PARAMS.update(new_params)
+        elif model_name == 'catboost':
+            cls.CATBOOST_PARAMS.update(new_params)
+    
+    @classmethod
+    def get_fast_mode_config(cls):
+        """빠른 실행 모드 설정 반환"""
+        fast_config = {
+            'models': cls.FAST_MODE_MODELS,
+            'optuna_trials': 100,
+            'cv_folds': 3,
+            'feature_selection_k': 40,
+            'n_estimators': 300
+        }
+        return fast_config
+    
+    @classmethod
+    def get_full_mode_config(cls):
+        """전체 실행 모드 설정 반환"""
+        full_config = {
+            'models': cls.FULL_MODE_MODELS,
+            'optuna_trials': cls.OPTUNA_TRIALS,
+            'cv_folds': cls.CV_FOLDS,
+            'feature_selection_k': cls.FEATURE_SELECTION_K,
+            'n_estimators': 600
+        }
+        return full_config

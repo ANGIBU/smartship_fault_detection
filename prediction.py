@@ -56,11 +56,10 @@ class Prediction:
         return self.predictions
     
     @timer
-    def predict_with_ensemble(self, models_dict, X_test, weights=None, method='weighted_average'):
+    def predict_with_ensemble(self, models_dict, X_test, weights=None):
         """앙상블 예측"""
         print("=== 앙상블 예측 수행 중 ===")
         print(f"사용 모델 수: {len(models_dict)}")
-        print(f"앙상블 방법: {method}")
         
         if weights is None:
             weights = [1.0] * len(models_dict)
@@ -69,69 +68,32 @@ class Prediction:
             print("가중치 개수가 모델 개수와 맞지 않아 균등 가중치 사용")
             weights = [1.0] * len(models_dict)
         
-        all_predictions = []
         all_probabilities = []
         
         for i, (name, model) in enumerate(models_dict.items()):
             print(f"{name} 예측 중...")
             
             try:
-                # 확률 예측
                 if hasattr(model, 'predict_proba'):
                     proba = model.predict_proba(X_test)
                     all_probabilities.append(proba * weights[i])
-                
-                # 클래스 예측
-                pred = model.predict(X_test)
-                all_predictions.append(pred)
-                
+                else:
+                    print(f"{name}은 확률 예측을 지원하지 않아 건너뜀")
+                    
             except Exception as e:
                 print(f"{name} 예측 실패: {e}")
                 continue
         
-        if not all_predictions:
+        if not all_probabilities:
             raise ValueError("유효한 예측이 없습니다.")
         
-        # 앙상블 방법에 따른 예측
-        if method == 'weighted_average' and all_probabilities:
-            # 가중 평균 확률 기반 예측
-            ensemble_probabilities = np.average(all_probabilities, axis=0, weights=weights[:len(all_probabilities)])
-            ensemble_predictions = np.argmax(ensemble_probabilities, axis=1)
-            self.prediction_probabilities = ensemble_probabilities
-            
-        elif method == 'majority_vote':
-            # 다수결 투표
-            ensemble_predictions = []
-            for i in range(len(X_test)):
-                votes = [pred[i] for pred in all_predictions]
-                ensemble_predictions.append(max(set(votes), key=votes.count))
-            ensemble_predictions = np.array(ensemble_predictions)
-            
-        elif method == 'rank_average':
-            # 랭크 평균
-            rank_matrix = np.zeros((len(X_test), Config.N_CLASSES))
-            
-            for pred in all_predictions:
-                for i, p in enumerate(pred):
-                    rank_matrix[i, p] += 1
-            
-            ensemble_predictions = np.argmax(rank_matrix, axis=1)
-            
-        else:
-            # 기본: 가중 평균
-            if all_probabilities:
-                ensemble_probabilities = np.average(all_probabilities, axis=0, weights=weights[:len(all_probabilities)])
-                ensemble_predictions = np.argmax(ensemble_probabilities, axis=1)
-                self.prediction_probabilities = ensemble_probabilities
-            else:
-                # 확률이 없으면 다수결
-                ensemble_predictions = []
-                for i in range(len(X_test)):
-                    votes = [pred[i] for pred in all_predictions]
-                    ensemble_predictions.append(max(set(votes), key=votes.count))
-                ensemble_predictions = np.array(ensemble_predictions)
+        # 가중 평균 확률
+        ensemble_probabilities = np.average(all_probabilities, axis=0, weights=weights[:len(all_probabilities)])
+        ensemble_predictions = np.argmax(ensemble_probabilities, axis=1)
         
+        self.prediction_probabilities = ensemble_probabilities
         self.predictions = ensemble_predictions
+        
         print(f"앙상블 예측 완료: {len(self.predictions)}개 샘플")
         
         # 예측 결과 검증
@@ -139,78 +101,59 @@ class Prediction:
         
         return self.predictions
     
-    @timer
-    def predict_with_confidence_filtering(self, X_test, confidence_threshold=0.8):
-        """신뢰도 기반 예측 필터링"""
-        if self.model is None:
-            raise ValueError("모델이 로드되지 않았습니다.")
+    def balance_predictions(self, target_distribution=None):
+        """예측 분포 균형 조정"""
+        if self.predictions is None or self.prediction_probabilities is None:
+            print("예측이 수행되지 않아 균형 조정 불가")
+            return self.predictions
         
-        print(f"=== 신뢰도 기반 예측 수행 중 (임계값: {confidence_threshold}) ===")
+        print("=== 예측 분포 균형 조정 시작 ===")
         
-        # 확률 예측
-        probabilities = self.model.predict_proba(X_test)
-        predictions = self.model.predict(X_test)
+        # 현재 예측 분포 분석
+        current_counts = np.bincount(self.predictions, minlength=Config.N_CLASSES)
+        total_samples = len(self.predictions)
         
-        # 최대 확률로 신뢰도 계산
-        max_probabilities = np.max(probabilities, axis=1)
-        high_confidence_mask = max_probabilities >= confidence_threshold
+        # 목표 분포 설정 (균등 분포)
+        if target_distribution is None:
+            target_per_class = total_samples // Config.N_CLASSES
+            target_distribution = np.full(Config.N_CLASSES, target_per_class)
+            # 나머지 샘플 분배
+            remainder = total_samples % Config.N_CLASSES
+            target_distribution[:remainder] += 1
         
-        print(f"신뢰도 {confidence_threshold} 이상 예측: {np.sum(high_confidence_mask)}개 ({np.mean(high_confidence_mask)*100:.1f}%)")
-        print(f"낮은 신뢰도 예측: {np.sum(~high_confidence_mask)}개 ({np.mean(~high_confidence_mask)*100:.1f}%)")
+        print(f"목표 분포: 클래스당 약 {target_distribution[0]}개")
         
-        # 신뢰도 정보 반환
-        confidence_info = {
-            'predictions': predictions,
-            'probabilities': probabilities,
-            'max_probabilities': max_probabilities,
-            'high_confidence_mask': high_confidence_mask,
-            'confidence_threshold': confidence_threshold,
-            'high_confidence_count': np.sum(high_confidence_mask),
-            'low_confidence_count': np.sum(~high_confidence_mask)
-        }
+        # 확률 기반 재할당
+        balanced_predictions = self.predictions.copy()
         
-        return confidence_info
-    
-    @timer
-    def predict_with_tta(self, X_test, n_augmentations=5, noise_std=0.01):
-        """테스트 타임 증강을 이용한 예측"""
-        if self.model is None:
-            raise ValueError("모델이 로드되지 않았습니다.")
-        
-        print(f"=== TTA 예측 수행 중 (증강 {n_augmentations}회, 노이즈 std={noise_std}) ===")
-        
-        all_predictions = []
-        all_probabilities = []
-        
-        # 원본 예측
-        original_pred = self.model.predict_proba(X_test)
-        all_probabilities.append(original_pred)
-        
-        # 노이즈 추가 예측
-        np.random.seed(Config.RANDOM_STATE)
-        for i in range(n_augmentations):
-            noise = np.random.normal(0, noise_std, X_test.shape)
-            X_test_aug = X_test + noise
+        for class_id in range(Config.N_CLASSES):
+            current_count = current_counts[class_id]
+            target_count = target_distribution[class_id]
             
-            try:
-                aug_pred = self.model.predict_proba(X_test_aug)
-                all_probabilities.append(aug_pred)
-            except Exception as e:
-                print(f"증강 {i+1} 실패: {e}")
-                continue
+            if current_count > target_count:
+                # 과다 예측된 클래스에서 일부 제거
+                class_indices = np.where(balanced_predictions == class_id)[0]
+                class_probabilities = self.prediction_probabilities[class_indices, class_id]
+                
+                # 확률이 낮은 샘플들을 다른 클래스로 재할당
+                remove_count = current_count - target_count
+                low_prob_indices = class_indices[np.argsort(class_probabilities)[:remove_count]]
+                
+                # 두 번째로 높은 확률을 가진 클래스로 재할당
+                for idx in low_prob_indices:
+                    prob_sorted = np.argsort(self.prediction_probabilities[idx])[::-1]
+                    second_best = prob_sorted[1]  # 두 번째로 높은 확률 클래스
+                    balanced_predictions[idx] = second_best
         
-        # 평균 확률
-        if all_probabilities:
-            ensemble_probabilities = np.mean(all_probabilities, axis=0)
-            ensemble_predictions = np.argmax(ensemble_probabilities, axis=1)
-            
-            self.predictions = ensemble_predictions
-            self.prediction_probabilities = ensemble_probabilities
-            
-            print(f"TTA 예측 완료: {len(all_probabilities)}개 증강 사용")
-        else:
-            print("TTA 실패, 원본 예측 사용")
-            self.predictions = self.model.predict(X_test)
+        self.predictions = balanced_predictions
+        
+        # 균형 조정 결과 확인
+        new_counts = np.bincount(self.predictions, minlength=Config.N_CLASSES)
+        print("균형 조정 결과:")
+        for i in range(Config.N_CLASSES):
+            old_count = current_counts[i]
+            new_count = new_counts[i]
+            print(f"클래스 {i}: {old_count} → {new_count}")
         
         return self.predictions
     
@@ -226,11 +169,12 @@ class Prediction:
         distribution = dict(zip(unique, counts))
         
         print("클래스별 예측 개수:")
-        for class_id in sorted(distribution.keys()):
-            percentage = (distribution[class_id] / len(self.predictions)) * 100
-            print(f"클래스 {class_id}: {distribution[class_id]}개 ({percentage:.2f}%)")
+        for class_id in range(Config.N_CLASSES):
+            count = distribution.get(class_id, 0)
+            percentage = (count / len(self.predictions)) * 100
+            print(f"클래스 {class_id}: {count}개 ({percentage:.2f}%)")
         
-        # 분포 균형도 확인
+        # 분포 균형도 분석
         total_predictions = len(self.predictions)
         expected_per_class = total_predictions / Config.N_CLASSES
         
@@ -245,7 +189,7 @@ class Prediction:
             count = distribution.get(class_id, 0)
             if count == 0:
                 missing_classes.append(class_id)
-                imbalance_scores.append(1.0)  # 완전 불균형
+                imbalance_scores.append(1.0)
             else:
                 imbalance = abs(count - expected_per_class) / expected_per_class
                 imbalance_scores.append(imbalance)
@@ -256,6 +200,10 @@ class Prediction:
         if missing_classes:
             print(f"경고: 예측되지 않은 클래스: {missing_classes}")
         
+        # 불균형이 심한 경우 균형 조정 권장
+        if avg_imbalance > 0.3:
+            print("불균형이 심함. 균형 조정 권장")
+        
         return {
             'distribution': distribution,
             'total_predictions': total_predictions,
@@ -265,7 +213,7 @@ class Prediction:
         }
     
     @timer
-    def create_submission_file(self, test_ids, output_path=None, predictions=None):
+    def create_submission_file(self, test_ids, output_path=None, predictions=None, apply_balancing=True):
         """제출 파일 생성"""
         if predictions is None:
             predictions = self.predictions
@@ -277,6 +225,11 @@ class Prediction:
             output_path = Config.RESULT_FILE
         
         print("=== 제출 파일 생성 중 ===")
+        
+        # 균형 조정 적용
+        if apply_balancing and self.prediction_probabilities is not None:
+            print("예측 분포 균형 조정 적용 중...")
+            predictions = self.balance_predictions()
         
         # 기본 검증
         if len(test_ids) != len(predictions):
@@ -320,10 +273,10 @@ class Prediction:
         # 저장된 파일 검증
         try:
             saved_df = pd.read_csv(output_path)
-            if not saved_df.equals(submission_df):
-                print("경고: 저장된 파일이 원본과 다릅니다.")
-            else:
+            if saved_df.shape == submission_df.shape:
                 print("파일 저장 검증 완료")
+            else:
+                print("경고: 저장된 파일 크기가 다릅니다.")
         except Exception as e:
             print(f"파일 검증 실패: {e}")
         
@@ -351,9 +304,8 @@ class Prediction:
             macro_f1 = calculate_macro_f1(y_true, self.predictions)
             print(f"Macro F1 Score: {macro_f1:.4f}")
             
-            # 클래스별 정확도
-            class_accuracies = []
-            class_f1_scores = []
+            # 클래스별 성능 분석
+            class_metrics = []
             
             for class_id in range(Config.N_CLASSES):
                 class_mask = y_true == class_id
@@ -361,121 +313,36 @@ class Prediction:
                     class_pred = self.predictions[class_mask]
                     accuracy = np.mean(class_pred == class_id)
                     
-                    # 클래스별 F1 스코어
-                    true_pos = np.sum((y_true == class_id) & (self.predictions == class_id))
-                    false_pos = np.sum((y_true != class_id) & (self.predictions == class_id))
-                    false_neg = np.sum((y_true == class_id) & (self.predictions != class_id))
+                    # F1 스코어 계산
+                    tp = np.sum((y_true == class_id) & (self.predictions == class_id))
+                    fp = np.sum((y_true != class_id) & (self.predictions == class_id))
+                    fn = np.sum((y_true == class_id) & (self.predictions != class_id))
                     
-                    if true_pos + false_pos > 0:
-                        precision = true_pos / (true_pos + false_pos)
-                    else:
-                        precision = 0
+                    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+                    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+                    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
                     
-                    if true_pos + false_neg > 0:
-                        recall = true_pos / (true_pos + false_neg)
-                    else:
-                        recall = 0
-                    
-                    if precision + recall > 0:
-                        f1 = 2 * (precision * recall) / (precision + recall)
-                    else:
-                        f1 = 0
-                    
-                    class_accuracies.append(accuracy)
-                    class_f1_scores.append(f1)
+                    class_metrics.append({
+                        'class': class_id,
+                        'accuracy': accuracy,
+                        'f1': f1,
+                        'precision': precision,
+                        'recall': recall
+                    })
                     
                     print(f"클래스 {class_id} - 정확도: {accuracy:.4f}, F1: {f1:.4f}")
             
-            avg_class_accuracy = np.mean(class_accuracies) if class_accuracies else 0
-            avg_class_f1 = np.mean(class_f1_scores) if class_f1_scores else 0
+            avg_accuracy = np.mean([m['accuracy'] for m in class_metrics])
+            avg_f1 = np.mean([m['f1'] for m in class_metrics])
             
-            print(f"평균 클래스별 정확도: {avg_class_accuracy:.4f}")
-            print(f"평균 클래스별 F1: {avg_class_f1:.4f}")
+            print(f"평균 클래스별 정확도: {avg_accuracy:.4f}")
+            print(f"평균 클래스별 F1: {avg_f1:.4f}")
             
             return {
                 'macro_f1': macro_f1,
-                'avg_class_accuracy': avg_class_accuracy,
-                'avg_class_f1': avg_class_f1,
-                'class_accuracies': class_accuracies,
-                'class_f1_scores': class_f1_scores
+                'avg_class_accuracy': avg_accuracy,
+                'avg_class_f1': avg_f1,
+                'class_metrics': class_metrics
             }
         
         return None
-    
-    @timer
-    def calibrate_predictions(self, X_cal, y_cal, method='isotonic'):
-        """예측 확률 보정"""
-        if self.model is None:
-            raise ValueError("모델이 로드되지 않았습니다.")
-        
-        print(f"=== 예측 확률 보정 ({method}) ===")
-        
-        if method == 'isotonic':
-            from sklearn.isotonic import IsotonicRegression
-            calibrator = IsotonicRegression(out_of_bounds='clip')
-        elif method == 'platt':
-            from sklearn.linear_model import LogisticRegression
-            calibrator = LogisticRegression(random_state=Config.RANDOM_STATE)
-        else:
-            raise ValueError("지원하지 않는 보정 방법입니다.")
-        
-        # 보정 데이터로 확률 계산
-        cal_proba = self.model.predict_proba(X_cal)
-        
-        # 클래스별 보정기 훈련
-        calibrated_classifiers = {}
-        for class_id in range(Config.N_CLASSES):
-            # 이진 분류 문제로 변환
-            binary_labels = (y_cal == class_id).astype(int)
-            class_proba = cal_proba[:, class_id]
-            
-            if method == 'isotonic':
-                calibrator_class = IsotonicRegression(out_of_bounds='clip')
-                calibrator_class.fit(class_proba, binary_labels)
-            else:
-                calibrator_class = LogisticRegression(random_state=Config.RANDOM_STATE)
-                calibrator_class.fit(class_proba.reshape(-1, 1), binary_labels)
-            
-            calibrated_classifiers[class_id] = calibrator_class
-        
-        self.calibrated_classifiers = calibrated_classifiers
-        print("확률 보정 훈련 완료")
-        
-        return calibrated_classifiers
-    
-    def predict_calibrated(self, X_test):
-        """보정된 확률로 예측"""
-        if not hasattr(self, 'calibrated_classifiers'):
-            raise ValueError("확률 보정이 수행되지 않았습니다.")
-        
-        print("=== 보정된 확률 예측 ===")
-        
-        # 원본 확률
-        original_proba = self.model.predict_proba(X_test)
-        calibrated_proba = np.zeros_like(original_proba)
-        
-        # 클래스별 보정 적용
-        for class_id in range(Config.N_CLASSES):
-            calibrator = self.calibrated_classifiers[class_id]
-            class_proba = original_proba[:, class_id]
-            
-            if hasattr(calibrator, 'predict_proba'):
-                # Platt scaling
-                calibrated_class_proba = calibrator.predict_proba(class_proba.reshape(-1, 1))[:, 1]
-            else:
-                # Isotonic regression
-                calibrated_class_proba = calibrator.predict(class_proba)
-            
-            calibrated_proba[:, class_id] = calibrated_class_proba
-        
-        # 확률 정규화
-        calibrated_proba = calibrated_proba / calibrated_proba.sum(axis=1, keepdims=True)
-        
-        # 예측
-        calibrated_predictions = np.argmax(calibrated_proba, axis=1)
-        
-        self.prediction_probabilities = calibrated_proba
-        self.predictions = calibrated_predictions
-        
-        print("보정된 확률 예측 완료")
-        return calibrated_predictions

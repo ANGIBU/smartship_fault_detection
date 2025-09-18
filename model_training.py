@@ -2,10 +2,11 @@
 
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, VotingClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import f1_score, make_scorer
+from sklearn.utils.class_weight import compute_class_weight
 import lightgbm as lgb
 import xgboost as xgb
 import optuna
@@ -36,22 +37,30 @@ class ModelTraining:
         
         # 클래스 균형 조정
         params['class_weight'] = 'balanced'
+        params['is_unbalance'] = True
         
+        # Early stopping 처리
+        callbacks = []
         if X_val is not None and y_val is not None:
             eval_set = [(X_val, y_val)]
             eval_names = ['validation']
-            early_stopping_rounds = params.pop('early_stopping_rounds', 100)
-            
-            model = lgb.LGBMClassifier(**params)
+            early_stopping_rounds = params.pop('early_stopping_rounds', 50)
+            callbacks = [lgb.early_stopping(early_stopping_rounds, verbose=0)]
+        else:
+            eval_set = None
+            eval_names = None
+            params.pop('early_stopping_rounds', None)
+        
+        model = lgb.LGBMClassifier(**params)
+        
+        if eval_set:
             model.fit(
                 X_train, y_train, 
                 eval_set=eval_set, 
                 eval_names=eval_names, 
-                callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=0)]
+                callbacks=callbacks
             )
         else:
-            params.pop('early_stopping_rounds', None)
-            model = lgb.LGBMClassifier(**params)
             model.fit(X_train, y_train)
         
         self.models['lightgbm'] = model
@@ -69,20 +78,24 @@ class ModelTraining:
         else:
             params = params.copy()
         
-        # 클래스 균형 조정
-        from sklearn.utils.class_weight import compute_class_weight
+        # 클래스 가중치 계산
         classes = np.unique(y_train)
         class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
         weight_dict = dict(zip(classes, class_weights))
         sample_weights = np.array([weight_dict[y] for y in y_train])
         
-        early_stopping_rounds = params.pop('early_stopping_rounds', None)
-        
-        if X_val is not None and y_val is not None and early_stopping_rounds:
+        # Early stopping 처리
+        callbacks = []
+        early_stopping_rounds = params.pop('early_stopping_rounds', 50)
+        if X_val is not None and y_val is not None:
             eval_set = [(X_val, y_val)]
             callbacks = [xgb.callback.EarlyStopping(rounds=early_stopping_rounds, verbose=False)]
-            
-            model = xgb.XGBClassifier(**params)
+        else:
+            eval_set = None
+        
+        model = xgb.XGBClassifier(**params)
+        
+        if eval_set:
             model.fit(
                 X_train, y_train, 
                 sample_weight=sample_weights,
@@ -91,13 +104,58 @@ class ModelTraining:
                 verbose=False
             )
         else:
-            model = xgb.XGBClassifier(**params)
             model.fit(X_train, y_train, sample_weight=sample_weights)
         
         self.models['xgboost'] = model
         self.logger.info("XGBoost 모델 훈련 완료")
         
         return model
+    
+    @timer
+    def train_catboost(self, X_train, y_train, X_val=None, y_val=None):
+        """CatBoost 모델 훈련"""
+        print("=== CatBoost 모델 훈련 시작 ===")
+        
+        try:
+            from catboost import CatBoostClassifier
+            
+            params = {
+                'iterations': 1000,
+                'learning_rate': 0.08,
+                'depth': 8,
+                'l2_leaf_reg': 3,
+                'bootstrap_type': 'Bayesian',
+                'bagging_temperature': 1,
+                'subsample': 0.8,
+                'sampling_frequency': 'PerTree',
+                'colsample_bylevel': 0.8,
+                'random_seed': Config.RANDOM_STATE,
+                'verbose': False,
+                'auto_class_weights': 'Balanced',
+                'thread_count': Config.N_JOBS if Config.N_JOBS > 0 else None,
+                'task_type': 'CPU'
+            }
+            
+            model = CatBoostClassifier(**params)
+            
+            if X_val is not None and y_val is not None:
+                model.fit(
+                    X_train, y_train,
+                    eval_set=(X_val, y_val),
+                    early_stopping_rounds=50,
+                    use_best_model=True
+                )
+            else:
+                model.fit(X_train, y_train)
+            
+            self.models['catboost'] = model
+            self.logger.info("CatBoost 모델 훈련 완료")
+            
+            return model
+        
+        except ImportError:
+            print("CatBoost 라이브러리가 설치되지 않음. 건너뛰기")
+            return None
     
     @timer
     def train_random_forest(self, X_train, y_train, params=None):
@@ -107,7 +165,6 @@ class ModelTraining:
         if params is None:
             params = Config.RF_PARAMS.copy()
         
-        # 클래스 균형 조정
         params['class_weight'] = 'balanced'
         
         model = RandomForestClassifier(**params)
@@ -119,27 +176,8 @@ class ModelTraining:
         return model
     
     @timer
-    def train_extra_trees(self, X_train, y_train, params=None):
-        """Extra Trees 모델 훈련"""
-        print("=== Extra Trees 모델 훈련 시작 ===")
-        
-        if params is None:
-            params = Config.ET_PARAMS.copy()
-        
-        # 클래스 균형 조정
-        params['class_weight'] = 'balanced'
-        
-        model = ExtraTreesClassifier(**params)
-        model.fit(X_train, y_train)
-        
-        self.models['extra_trees'] = model
-        self.logger.info("Extra Trees 모델 훈련 완료")
-        
-        return model
-    
-    @timer
-    def hyperparameter_optimization_optuna(self, X_train, y_train, model_type='lightgbm', n_trials=200):
-        """Optuna를 사용한 하이퍼파라미터 튜닝"""
+    def hyperparameter_optimization_optuna(self, X_train, y_train, model_type='lightgbm', n_trials=300):
+        """하이퍼파라미터 튜닝"""
         print(f"=== {model_type} 하이퍼파라미터 튜닝 시작 ===")
         
         def objective(trial):
@@ -150,17 +188,18 @@ class ModelTraining:
                     'metric': 'multi_logloss',
                     'boosting_type': 'gbdt',
                     'class_weight': 'balanced',
-                    'num_leaves': trial.suggest_int('num_leaves', 20, 300),
-                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                    'feature_fraction': trial.suggest_float('feature_fraction', 0.5, 1.0),
-                    'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 1.0),
+                    'is_unbalance': True,
+                    'num_leaves': trial.suggest_int('num_leaves', 30, 300),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.3, log=True),
+                    'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
+                    'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
                     'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
                     'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
                     'reg_alpha': trial.suggest_float('reg_alpha', 0, 10),
                     'reg_lambda': trial.suggest_float('reg_lambda', 0, 10),
                     'verbose': -1,
                     'random_state': Config.RANDOM_STATE,
-                    'n_estimators': 500,
+                    'n_estimators': trial.suggest_int('n_estimators', 200, 1000),
                     'n_jobs': Config.N_JOBS
                 }
                 model = lgb.LGBMClassifier(**params)
@@ -170,21 +209,20 @@ class ModelTraining:
                     'objective': 'multi:softprob',
                     'num_class': Config.N_CLASSES,
                     'eval_metric': 'mlogloss',
-                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.3, log=True),
                     'max_depth': trial.suggest_int('max_depth', 3, 12),
-                    'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-                    'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                    'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                    'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
                     'reg_alpha': trial.suggest_float('reg_alpha', 0, 10),
                     'reg_lambda': trial.suggest_float('reg_lambda', 0, 10),
                     'gamma': trial.suggest_float('gamma', 0, 5),
                     'random_state': Config.RANDOM_STATE,
-                    'n_estimators': 500,
+                    'n_estimators': trial.suggest_int('n_estimators', 200, 1000),
                     'n_jobs': Config.N_JOBS,
                     'tree_method': 'hist'
                 }
                 
-                # 클래스 가중치 계산
-                from sklearn.utils.class_weight import compute_class_weight
+                # 클래스 가중치 적용
                 classes = np.unique(y_train)
                 class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
                 weight_dict = dict(zip(classes, class_weights))
@@ -192,7 +230,7 @@ class ModelTraining:
                 
                 model = xgb.XGBClassifier(**params)
                 
-                # 교차 검증에서 가중치 적용
+                # 가중치 적용한 교차 검증
                 cv_scores = []
                 skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=Config.RANDOM_STATE)
                 
@@ -201,14 +239,15 @@ class ModelTraining:
                     y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
                     sw_tr = sample_weights[train_idx]
                     
-                    model.fit(X_tr, y_tr, sample_weight=sw_tr, verbose=False)
-                    y_pred = model.predict(X_val)
+                    model_copy = xgb.XGBClassifier(**params)
+                    model_copy.fit(X_tr, y_tr, sample_weight=sw_tr, verbose=False)
+                    y_pred = model_copy.predict(X_val)
                     score = f1_score(y_val, y_pred, average='macro')
                     cv_scores.append(score)
                 
                 return np.mean(cv_scores)
             
-            # LightGBM의 경우 일반적인 교차 검증
+            # LightGBM 교차 검증
             cv_scores = cross_val_score(
                 model, X_train, y_train, 
                 cv=3, scoring=self.scorer, n_jobs=1
@@ -216,7 +255,7 @@ class ModelTraining:
             return cv_scores.mean()
         
         study = optuna.create_study(direction='maximize')
-        study.optimize(objective, n_trials=n_trials, timeout=1800)
+        study.optimize(objective, n_trials=n_trials, timeout=1800, show_progress_bar=False)
         
         print(f"최적 파라미터: {study.best_params}")
         print(f"최적 점수: {study.best_value:.4f}")
@@ -236,11 +275,9 @@ class ModelTraining:
         for model_name, model in self.models.items():
             print(f"\n{model_name} 교차 검증 중...")
             
-            # XGBoost의 경우 별도 처리
+            # XGBoost는 가중치 적용한 별도 검증
             if 'xgb' in str(type(model)).lower():
                 cv_scores = []
-                from sklearn.utils.class_weight import compute_class_weight
-                
                 classes = np.unique(y_train)
                 class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
                 weight_dict = dict(zip(classes, class_weights))
@@ -261,6 +298,7 @@ class ModelTraining:
                 
                 cv_scores = np.array(cv_scores)
             else:
+                # 일반 교차 검증
                 cv_scores = cross_val_score(
                     model, X_train, y_train, 
                     cv=skf, scoring=self.scorer, n_jobs=1
@@ -286,41 +324,42 @@ class ModelTraining:
         return self.cv_scores
     
     @timer
-    def create_voting_ensemble(self, X_train, y_train):
-        """투표 기반 앙상블 생성"""
-        print("=== 투표 앙상블 생성 시작 ===")
+    def create_simple_ensemble(self, X_train, y_train):
+        """간단한 앙상블 생성"""
+        print("=== 간단한 앙상블 생성 시작 ===")
         
-        if len(self.models) < 2:
-            print("앙상블을 위해 최소 2개의 모델이 필요합니다.")
-            return None
-        
-        # 상위 성능 모델만 선택 (CV 점수 0.75 이상)
+        # 성능 기준 모델 선택 (CV 점수 0.72 이상)
         good_models = []
         for name, model in self.models.items():
-            if name in self.cv_scores and self.cv_scores[name]['mean'] >= 0.75:
+            if name in self.cv_scores and self.cv_scores[name]['mean'] >= 0.72:
                 good_models.append((name, model))
         
         if len(good_models) < 2:
-            # 성능 기준 완화
-            good_models = [(name, model) for name, model in self.models.items()][:3]
+            # 기준 완화하여 상위 3개 모델 선택
+            sorted_models = sorted(self.cv_scores.items(), key=lambda x: x[1]['mean'], reverse=True)
+            good_models = [(name, self.models[name]) for name, _ in sorted_models[:3] if name in self.models]
         
-        print(f"앙상블에 사용할 모델: {[name for name, _ in good_models]}")
-        
-        try:
-            # Soft voting 앙상블
-            voting_ensemble = VotingClassifier(
-                estimators=good_models, 
-                voting='soft',
-                n_jobs=Config.N_JOBS
-            )
-            voting_ensemble.fit(X_train, y_train)
+        if len(good_models) >= 2:
+            print(f"앙상블에 사용할 모델: {[name for name, _ in good_models]}")
             
-            self.models['voting_ensemble'] = voting_ensemble
-            print("Soft voting 앙상블 생성 완료")
-            
-            return voting_ensemble
-        except Exception as e:
-            print(f"앙상블 생성 실패: {e}")
+            try:
+                # Soft voting 앙상블
+                voting_ensemble = VotingClassifier(
+                    estimators=good_models, 
+                    voting='soft',
+                    n_jobs=Config.N_JOBS
+                )
+                voting_ensemble.fit(X_train, y_train)
+                
+                self.models['ensemble'] = voting_ensemble
+                print("Soft voting 앙상블 생성 완료")
+                
+                return voting_ensemble
+            except Exception as e:
+                print(f"앙상블 생성 실패: {e}")
+                return None
+        else:
+            print("앙상블을 위한 충분한 모델이 없음")
             return None
     
     @timer
@@ -335,31 +374,35 @@ class ModelTraining:
         
         print("=== 피처 중요도 분석 시작 ===")
         
-        if hasattr(model, 'feature_importances_'):
-            importances = model.feature_importances_
-        elif hasattr(model, 'coef_'):
-            importances = np.abs(model.coef_).mean(axis=0)
-        else:
-            print("피처 중요도를 추출할 수 없는 모델입니다.")
+        try:
+            if hasattr(model, 'feature_importances_'):
+                importances = model.feature_importances_
+            elif hasattr(model, 'coef_'):
+                importances = np.abs(model.coef_).mean(axis=0)
+            else:
+                print("피처 중요도를 추출할 수 없는 모델입니다.")
+                return None
+            
+            if feature_names is None and hasattr(model, 'feature_names_in_'):
+                feature_names = model.feature_names_in_
+            elif feature_names is None:
+                feature_names = [f'feature_{i}' for i in range(len(importances))]
+            
+            feature_importance_df = pd.DataFrame({
+                'feature': feature_names,
+                'importance': importances
+            }).sort_values('importance', ascending=False)
+            
+            print("상위 15개 중요 피처:")
+            print(feature_importance_df.head(15))
+            
+            from utils import save_results
+            save_results(feature_importance_df, Config.FEATURE_IMPORTANCE_FILE)
+            
+            return feature_importance_df
+        except Exception as e:
+            print(f"피처 중요도 분석 실패: {e}")
             return None
-        
-        if feature_names is None and hasattr(model, 'feature_names_in_'):
-            feature_names = model.feature_names_in_
-        elif feature_names is None:
-            feature_names = [f'feature_{i}' for i in range(len(importances))]
-        
-        feature_importance_df = pd.DataFrame({
-            'feature': feature_names,
-            'importance': importances
-        }).sort_values('importance', ascending=False)
-        
-        print("상위 20개 중요 피처:")
-        print(feature_importance_df.head(20))
-        
-        from utils import save_results
-        save_results(feature_importance_df, Config.FEATURE_IMPORTANCE_FILE)
-        
-        return feature_importance_df
     
     @timer
     def train_all_models(self, X_train, y_train, X_val=None, y_val=None, use_optimization=False, model_list=None):
@@ -367,14 +410,14 @@ class ModelTraining:
         print("=== 전체 모델 훈련 시작 ===")
         
         if model_list is None:
-            model_list = ['lightgbm', 'xgboost', 'random_forest', 'extra_trees']
+            model_list = ['lightgbm', 'xgboost', 'catboost', 'random_forest']
         
         # 기본 모델들 훈련
         if 'lightgbm' in model_list:
             if use_optimization:
                 print("LightGBM 하이퍼파라미터 튜닝 중...")
                 best_params, _ = self.hyperparameter_optimization_optuna(
-                    X_train, y_train, 'lightgbm', n_trials=200
+                    X_train, y_train, 'lightgbm', n_trials=300
                 )
                 self.train_lightgbm(X_train, y_train, X_val, y_val, best_params)
             else:
@@ -384,45 +427,43 @@ class ModelTraining:
             if use_optimization:
                 print("XGBoost 하이퍼파라미터 튜닝 중...")
                 best_params, _ = self.hyperparameter_optimization_optuna(
-                    X_train, y_train, 'xgboost', n_trials=200
+                    X_train, y_train, 'xgboost', n_trials=300
                 )
                 self.train_xgboost(X_train, y_train, X_val, y_val, best_params)
             else:
                 self.train_xgboost(X_train, y_train, X_val, y_val)
         
+        if 'catboost' in model_list:
+            self.train_catboost(X_train, y_train, X_val, y_val)
+        
         if 'random_forest' in model_list:
             self.train_random_forest(X_train, y_train)
-        
-        if 'extra_trees' in model_list:
-            self.train_extra_trees(X_train, y_train)
         
         # 교차 검증
         self.cross_validation(X_train, y_train)
         
-        # 앙상블 생성 (성능이 좋을 때만)
-        if len(self.models) >= 2:
-            self.create_voting_ensemble(X_train, y_train)
+        # 간단한 앙상블 생성
+        ensemble = self.create_simple_ensemble(X_train, y_train)
+        if ensemble:
+            # 앙상블 성능 검증
+            ensemble_cv = cross_val_score(
+                ensemble, X_train, y_train, 
+                cv=3, scoring=self.scorer, n_jobs=1
+            )
             
-            # 앙상블 성능도 검증
-            if 'voting_ensemble' in self.models:
-                ensemble_cv = cross_val_score(
-                    self.models['voting_ensemble'], X_train, y_train, 
-                    cv=3, scoring=self.scorer, n_jobs=1
-                )
-                
-                self.cv_scores['voting_ensemble'] = {
-                    'scores': ensemble_cv,
-                    'mean': ensemble_cv.mean(),
-                    'std': ensemble_cv.std()
-                }
-                
-                print(f"앙상블 CV 점수: {ensemble_cv.mean():.4f} (+/- {ensemble_cv.std() * 2:.4f})")
-                
-                # 앙상블이 더 좋으면 최고 모델로 업데이트
-                if ensemble_cv.mean() > self.best_score:
-                    self.best_model = self.models['voting_ensemble']
-                    self.best_score = ensemble_cv.mean()
-                    print("앙상블이 최고 성능 모델로 선택됨")
+            self.cv_scores['ensemble'] = {
+                'scores': ensemble_cv,
+                'mean': ensemble_cv.mean(),
+                'std': ensemble_cv.std()
+            }
+            
+            print(f"앙상블 CV 점수: {ensemble_cv.mean():.4f} (+/- {ensemble_cv.std() * 2:.4f})")
+            
+            # 앙상블이 더 좋으면 업데이트
+            if ensemble_cv.mean() > self.best_score:
+                self.best_model = ensemble
+                self.best_score = ensemble_cv.mean()
+                print("앙상블이 최고 성능 모델로 선택됨")
         
         # 최고 모델 저장
         if self.best_model is not None:

@@ -58,12 +58,15 @@ def main():
         print(f"훈련 세트: {X_train_split.shape}")
         print(f"검증 세트: {X_val.shape}")
         
-        # 모델 훈련 (효율적인 모델만)
+        # 전체 모드 설정
+        full_config = Config.get_full_mode_config()
+        
+        # 모델 훈련
         models, best_model = trainer.train_all_models(
             X_train_split, y_train_split, 
             X_val, y_val,
             use_optimization=True,
-            model_list=['lightgbm', 'xgboost', 'random_forest']
+            model_list=full_config['models']
         )
         
         print(f"훈련된 모델 개수: {len(models)}")
@@ -84,31 +87,26 @@ def main():
         
         predictor = Prediction(best_model)
         
-        # 단일 모델 예측
-        test_predictions = predictor.predict(X_test)
-        
-        # 앙상블 예측 (성능 모델이 2개 이상인 경우)
+        # 앙상블 예측 수행
         good_models = {name: model for name, model in models.items() 
-                      if name in trainer.cv_scores and trainer.cv_scores[name]['mean'] >= 0.75}
+                      if name in trainer.cv_scores and trainer.cv_scores[name]['mean'] >= 0.73}
         
         if len(good_models) >= 2:
             print(f"앙상블 사용 모델: {list(good_models.keys())}")
-            ensemble_predictions = predictor.predict_with_ensemble(
-                good_models, X_test, method='weighted_average'
-            )
-            
-            # 예측 분포 균형 조정
-            predictor.predictions = ensemble_predictions
+            ensemble_predictions = predictor.predict_with_ensemble(good_models, X_test)
+        else:
+            # 단일 모델 예측
+            test_predictions = predictor.predict(X_test)
         
         # 예측 분포 분석
         distribution_info = predictor.analyze_prediction_distribution()
         
-        # 4. 제출 파일 생성
+        # 4. 제출 파일 생성 (균형 조정 적용)
         print("\n" + "=" * 50)
         print("4단계: 제출 파일 생성")
         print("=" * 50)
         
-        submission_df = predictor.create_submission_file(test_ids)
+        submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
         
         print(f"제출 파일 생성 완료: {Config.RESULT_FILE}")
         print(f"제출 파일 형태: {submission_df.shape}")
@@ -161,73 +159,6 @@ def main():
         print(f"오류 발생: {e}")
         raise
 
-def run_prediction_only():
-    """훈련된 모델로만 예측 수행"""
-    print("=" * 50)
-    print("   예측 전용 모드")
-    print("=" * 50)
-    
-    try:
-        Config.create_directories()
-        
-        processor = DataProcessor()
-        X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
-            use_feature_selection=True
-        )
-        
-        predictor = Prediction()
-        predictor.load_trained_model()
-        
-        predictions = predictor.predict(X_test)
-        
-        submission_df = predictor.create_submission_file(test_ids)
-        
-        print(f"예측 완료: {Config.RESULT_FILE}")
-        
-        return submission_df
-        
-    except Exception as e:
-        print(f"예측 중 오류 발생: {e}")
-        raise
-
-def run_hyperparameter_optimization():
-    """하이퍼파라미터 최적화 모드"""
-    print("=" * 50)
-    print("   하이퍼파라미터 최적화 모드")
-    print("=" * 50)
-    
-    try:
-        Config.create_directories()
-        
-        processor = DataProcessor()
-        X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
-            use_feature_selection=True
-        )
-        
-        from sklearn.model_selection import train_test_split
-        X_train_split, X_val, y_train_split, y_val = train_test_split(
-            X_train, y_train, 
-            test_size=Config.VALIDATION_SIZE, 
-            random_state=Config.RANDOM_STATE,
-            stratify=y_train
-        )
-        
-        trainer = ModelTraining()
-        models, best_model = trainer.train_all_models(
-            X_train_split, y_train_split,
-            X_val, y_val,
-            use_optimization=True,
-            model_list=['lightgbm', 'xgboost']
-        )
-        
-        print("하이퍼파라미터 최적화 완료")
-        
-        return models, best_model
-        
-    except Exception as e:
-        print(f"최적화 중 오류 발생: {e}")
-        raise
-
 def run_fast_mode():
     """빠른 실행 모드"""
     print("=" * 50)
@@ -237,11 +168,103 @@ def run_fast_mode():
     try:
         Config.create_directories()
         
+        # 데이터 전처리
         processor = DataProcessor()
         X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
             use_feature_selection=True
         )
         
+        # 검증 데이터 분할
+        from sklearn.model_selection import train_test_split
+        X_train_split, X_val, y_train_split, y_val = train_test_split(
+            X_train, y_train, 
+            test_size=0.15,  # 검증 세트 크기 축소
+            random_state=Config.RANDOM_STATE,
+            stratify=y_train
+        )
+        
+        print(f"훈련 세트: {X_train_split.shape}")
+        print(f"검증 세트: {X_val.shape}")
+        
+        # 빠른 모드 설정
+        fast_config = Config.get_fast_mode_config()
+        
+        # 모델 훈련 (LightGBM, XGBoost만)
+        trainer = ModelTraining()
+        models, best_model = trainer.train_all_models(
+            X_train_split, y_train_split,
+            X_val, y_val,
+            use_optimization=False,  # 빠른 실행을 위해 최적화 생략
+            model_list=fast_config['models']
+        )
+        
+        print(f"훈련된 모델 개수: {len(models)}")
+        print(f"최고 성능 모델: {type(best_model).__name__}")
+        
+        # 테스트 예측
+        predictor = Prediction(best_model)
+        test_predictions = predictor.predict(X_test)
+        
+        # 제출 파일 생성
+        submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
+        
+        print(f"빠른 실행 완료: {Config.RESULT_FILE}")
+        
+        return models, best_model, submission_df
+        
+    except Exception as e:
+        print(f"빠른 실행 중 오류 발생: {e}")
+        raise
+
+def run_prediction_only():
+    """훈련된 모델로만 예측 수행"""
+    print("=" * 50)
+    print("   예측 전용 모드")
+    print("=" * 50)
+    
+    try:
+        Config.create_directories()
+        
+        # 데이터 전처리
+        processor = DataProcessor()
+        X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
+            use_feature_selection=True
+        )
+        
+        # 훈련된 모델 로드
+        predictor = Prediction()
+        predictor.load_trained_model()
+        
+        # 예측 수행
+        predictions = predictor.predict(X_test)
+        
+        # 제출 파일 생성
+        submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
+        
+        print(f"예측 완료: {Config.RESULT_FILE}")
+        
+        return submission_df
+        
+    except Exception as e:
+        print(f"예측 중 오류 발생: {e}")
+        raise
+
+def run_optimization_mode():
+    """하이퍼파라미터 튜닝 모드"""
+    print("=" * 50)
+    print("   하이퍼파라미터 튜닝 모드")
+    print("=" * 50)
+    
+    try:
+        Config.create_directories()
+        
+        # 데이터 전처리
+        processor = DataProcessor()
+        X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
+            use_feature_selection=True
+        )
+        
+        # 검증 데이터 분할
         from sklearn.model_selection import train_test_split
         X_train_split, X_val, y_train_split, y_val = train_test_split(
             X_train, y_train, 
@@ -250,22 +273,81 @@ def run_fast_mode():
             stratify=y_train
         )
         
+        # 집중 튜닝 (LightGBM, XGBoost만)
         trainer = ModelTraining()
+        models, best_model = trainer.train_all_models(
+            X_train_split, y_train_split,
+            X_val, y_val,
+            use_optimization=True,
+            model_list=['lightgbm', 'xgboost']
+        )
         
-        # LightGBM만 사용
-        trainer.train_lightgbm(X_train_split, y_train_split, X_val, y_val)
-        trainer.cross_validation(X_train_split, y_train_split)
-        
-        predictor = Prediction(trainer.best_model)
+        # 테스트 예측
+        predictor = Prediction(best_model)
         test_predictions = predictor.predict(X_test)
-        submission_df = predictor.create_submission_file(test_ids)
         
-        print(f"빠른 실행 완료: {Config.RESULT_FILE}")
+        # 제출 파일 생성
+        submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
         
-        return trainer.models, trainer.best_model
+        print("하이퍼파라미터 튜닝 완료")
+        print(f"제출 파일: {Config.RESULT_FILE}")
+        
+        return models, best_model, submission_df
         
     except Exception as e:
-        print(f"빠른 실행 중 오류 발생: {e}")
+        print(f"튜닝 중 오류 발생: {e}")
+        raise
+
+def run_ensemble_mode():
+    """앙상블 전용 모드"""
+    print("=" * 50)
+    print("   앙상블 전용 모드")
+    print("=" * 50)
+    
+    try:
+        Config.create_directories()
+        
+        # 데이터 전처리
+        processor = DataProcessor()
+        X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
+            use_feature_selection=True
+        )
+        
+        # 검증 데이터 분할
+        from sklearn.model_selection import train_test_split
+        X_train_split, X_val, y_train_split, y_val = train_test_split(
+            X_train, y_train, 
+            test_size=Config.VALIDATION_SIZE, 
+            random_state=Config.RANDOM_STATE,
+            stratify=y_train
+        )
+        
+        # 다양한 모델 훈련
+        trainer = ModelTraining()
+        models, best_model = trainer.train_all_models(
+            X_train_split, y_train_split,
+            X_val, y_val,
+            use_optimization=False,
+            model_list=['lightgbm', 'xgboost', 'catboost', 'random_forest']
+        )
+        
+        # 앙상블 예측
+        predictor = Prediction()
+        
+        # 모든 모델로 앙상블
+        ensemble_predictions = predictor.predict_with_ensemble(models, X_test)
+        
+        # 제출 파일 생성
+        submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
+        
+        print("앙상블 실행 완료")
+        print(f"사용 모델: {list(models.keys())}")
+        print(f"제출 파일: {Config.RESULT_FILE}")
+        
+        return models, predictor, submission_df
+        
+    except Exception as e:
+        print(f"앙상블 실행 중 오류 발생: {e}")
         raise
 
 if __name__ == "__main__":
@@ -274,17 +356,20 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         mode = sys.argv[1]
         
-        if mode == "predict":
+        if mode == "fast":
+            run_fast_mode()
+        elif mode == "predict":
             run_prediction_only()
         elif mode == "optimize":
-            run_hyperparameter_optimization()
-        elif mode == "fast":
-            run_fast_mode()
+            run_optimization_mode()
+        elif mode == "ensemble":
+            run_ensemble_mode()
         else:
             print("사용법:")
             print("  python main.py          # 전체 실행")
-            print("  python main.py predict  # 예측만 실행")
-            print("  python main.py optimize # 최적화 포함 실행")
             print("  python main.py fast     # 빠른 실행")
+            print("  python main.py predict  # 예측만 실행")
+            print("  python main.py optimize # 하이퍼파라미터 튜닝")
+            print("  python main.py ensemble # 앙상블 전용")
     else:
         main()
