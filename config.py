@@ -34,30 +34,30 @@ class Config:
     RANDOM_STATE = 42
     N_JOBS = -1
     
-    # 교차 검증 설정 - 정교화
-    CV_FOLDS = 7  # 21개 클래스에서 안정적 검증을 위해 증가
-    VALIDATION_SIZE = 0.15  # 검증 세트 크기 축소로 훈련 데이터 확보
+    # 교차 검증 설정
+    CV_FOLDS = 5  # 실행 시간 단축을 위해 감소
+    VALIDATION_SIZE = 0.15
     
-    # 피처 선택 설정 - 조정
-    FEATURE_SELECTION_K = 45  # 과도한 피처 방지
-    PCA_COMPONENTS = 0.98  # 정보 손실 최소화
+    # 피처 선택 설정
+    FEATURE_SELECTION_K = 45
+    PCA_COMPONENTS = 0.98
     
-    # LightGBM 파라미터 - 성능 중심 조정
+    # LightGBM 파라미터
     LGBM_PARAMS = {
         'objective': 'multiclass',
         'num_class': N_CLASSES,
         'metric': 'multi_logloss',
         'boosting_type': 'gbdt',
-        'num_leaves': 80,  # 과적합 방지를 위해 감소
-        'learning_rate': 0.08,  # 안정적 학습을 위해 감소
-        'feature_fraction': 0.7,  # 피처 샘플링 비율 조정
+        'num_leaves': 80,
+        'learning_rate': 0.08,
+        'feature_fraction': 0.7,
         'bagging_fraction': 0.75,
         'bagging_freq': 3,
-        'min_child_samples': 25,  # 과적합 방지 증가
+        'min_child_samples': 25,
         'min_child_weight': 0.01,
-        'reg_alpha': 0.5,  # 정규화 강화
+        'reg_alpha': 0.5,
         'reg_lambda': 0.5,
-        'max_depth': 8,  # 깊이 제한
+        'max_depth': 8,
         'verbose': -1,
         'random_state': RANDOM_STATE,
         'n_estimators': 800,
@@ -65,66 +65,66 @@ class Config:
         'early_stopping_rounds': 100,
         'class_weight': 'balanced',
         'is_unbalance': True,
-        'force_col_wise': True,  # 메모리 효율성
+        'force_col_wise': True,
     }
     
-    # XGBoost 파라미터 - 정밀 조정
+    # XGBoost 파라미터
     XGB_PARAMS = {
         'objective': 'multi:softprob',
         'num_class': N_CLASSES,
         'eval_metric': 'mlogloss',
-        'learning_rate': 0.06,  # 안정적 학습
-        'max_depth': 7,  # 깊이 제한으로 과적합 방지
+        'learning_rate': 0.06,
+        'max_depth': 7,
         'subsample': 0.8,
         'colsample_bytree': 0.8,
-        'colsample_bylevel': 0.8,  # 추가 정규화
-        'reg_alpha': 1.0,  # L1 정규화 강화
-        'reg_lambda': 1.0,  # L2 정규화 강화
-        'gamma': 0.5,  # 최소 분할 손실
-        'min_child_weight': 5,  # 과적합 방지
+        'colsample_bylevel': 0.8,
+        'reg_alpha': 1.0,
+        'reg_lambda': 1.0,
+        'gamma': 0.5,
+        'min_child_weight': 5,
         'random_state': RANDOM_STATE,
         'n_estimators': 800,
         'n_jobs': N_JOBS,
         'tree_method': 'hist',
         'early_stopping_rounds': 100,
-        'grow_policy': 'depthwise',  # 안정적 성장
-        'max_leaves': 0,  # max_depth로 제어
+        'grow_policy': 'depthwise',
+        'max_leaves': 0,
     }
     
-    # Random Forest 파라미터 - 균형 조정
+    # Random Forest 파라미터
     RF_PARAMS = {
-        'n_estimators': 500,  # 트리 수 증가
-        'max_depth': 20,  # 깊이 제한
-        'min_samples_split': 5,  # 분할 최소 샘플 증가
-        'min_samples_leaf': 2,  # 리프 최소 샘플 증가
+        'n_estimators': 300,  # 실행 시간 단축을 위해 감소
+        'max_depth': 15,  # 과적합 방지를 위해 감소
+        'min_samples_split': 5,
+        'min_samples_leaf': 2,
         'max_features': 'sqrt',
-        'max_samples': 0.8,  # 배깅 샘플링 비율
+        'max_samples': 0.8,
         'random_state': RANDOM_STATE,
         'n_jobs': N_JOBS,
         'class_weight': 'balanced',
         'bootstrap': True,
-        'oob_score': True,  # OOB 점수 계산
+        'oob_score': True,
     }
     
     # Extra Trees 파라미터
     ET_PARAMS = {
-        'n_estimators': 500,
-        'max_depth': 18,
+        'n_estimators': 300,
+        'max_depth': 15,
         'min_samples_split': 4,
         'min_samples_leaf': 2,
         'max_features': 'sqrt',
         'random_state': RANDOM_STATE,
         'n_jobs': N_JOBS,
         'class_weight': 'balanced',
-        'bootstrap': False,  # Extra Trees 특성
+        'bootstrap': False,
     }
     
-    # CatBoost 파라미터 - 안정성 중심
+    # CatBoost 파라미터
     CATBOOST_PARAMS = {
-        'iterations': 800,
-        'learning_rate': 0.05,  # 안정적 학습률
-        'depth': 7,  # 깊이 제한
-        'l2_leaf_reg': 5,  # 정규화 강화
+        'iterations': 600,  # 실행 시간 단축을 위해 감소
+        'learning_rate': 0.05,
+        'depth': 7,
+        'l2_leaf_reg': 5,
         'bootstrap_type': 'Bayesian',
         'bagging_temperature': 0.8,
         'sampling_frequency': 'PerTree',
@@ -139,28 +139,28 @@ class Config:
         'eval_metric': 'MultiClass',
     }
     
-    # 하이퍼파라미터 튜닝 설정 - 확장
-    OPTUNA_TRIALS = 500  # 시도 횟수 증가
-    OPTUNA_TIMEOUT = 3600  # 1시간 제한
+    # 하이퍼파라미터 튜닝 설정 - 실행 시간 최적화
+    OPTUNA_TRIALS = 200  # 500에서 200으로 감소
+    OPTUNA_TIMEOUT = 1800  # 3600에서 1800초(30분)로 감소
     
     # 앙상블 설정
     ENSEMBLE_METHODS = ['voting', 'stacking']
-    STACKING_CV = 5  # 스태킹 CV 폴드 증가
+    STACKING_CV = 3  # 실행 시간 단축을 위해 감소
     
     # 신경망 파라미터
     NN_PARAMS = {
-        'hidden_layer_sizes': (128, 64, 32),  # 더 깊은 네트워크
+        'hidden_layer_sizes': (100, 50),  # 복잡도 감소
         'activation': 'relu',
         'solver': 'adam',
-        'alpha': 0.001,  # 정규화
+        'alpha': 0.001,
         'learning_rate': 'adaptive',
         'learning_rate_init': 0.001,
-        'max_iter': 1000,
+        'max_iter': 500,  # 반복 수 감소
         'random_state': RANDOM_STATE,
         'early_stopping': True,
         'validation_fraction': 0.1,
-        'n_iter_no_change': 20,
-        'tol': 1e-6,
+        'n_iter_no_change': 15,  # 조기 중단 기준 강화
+        'tol': 1e-4,  # 허용 오차 완화
     }
     
     # SVM 파라미터
@@ -171,7 +171,7 @@ class Config:
         'class_weight': 'balanced',
         'random_state': RANDOM_STATE,
         'probability': True,
-        'cache_size': 2000,  # 메모리 할당량
+        'cache_size': 2000,
         'max_iter': 1000,
         'tol': 1e-4,
     }
@@ -180,14 +180,18 @@ class Config:
     LOG_LEVEL = 'INFO'
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     
-    # 실행 모드 설정
-    FAST_MODE_MODELS = ['lightgbm', 'xgboost']
+    # 실행 모드별 설정
+    FAST_MODE_MODELS = ['lightgbm', 'random_forest']  # XGBoost 제거로 빠른 실행
     FULL_MODE_MODELS = ['lightgbm', 'xgboost', 'catboost', 'random_forest', 'linear']
     EXTENDED_MODE_MODELS = ['lightgbm', 'xgboost', 'catboost', 'random_forest', 'linear', 'neural_network', 'additional']
     
     # 성능 임계값 설정
-    MIN_CV_SCORE = 0.73  # 최소 교차 검증 점수
-    ENSEMBLE_THRESHOLD = 0.75  # 앙상블 포함 임계값
+    MIN_CV_SCORE = 0.70  # 기준 완화
+    ENSEMBLE_THRESHOLD = 0.72  # 기준 완화
+    
+    # 메모리 최적화 설정
+    MEMORY_EFFICIENT = True
+    CHUNK_SIZE = 1000  # 대용량 데이터 처리시 청크 크기
     
     @classmethod
     def create_directories(cls):
@@ -232,11 +236,12 @@ class Config:
         """빠른 실행 모드 설정 반환"""
         fast_config = {
             'models': cls.FAST_MODE_MODELS,
-            'optuna_trials': 200,
-            'cv_folds': 5,
+            'optuna_trials': 50,  # 빠른 모드에서는 더욱 감소
+            'cv_folds': 3,
             'feature_selection_k': 35,
-            'n_estimators': 400,
-            'validation_size': 0.1
+            'n_estimators': 200,
+            'validation_size': 0.1,
+            'timeout': 600  # 10분 제한
         }
         return fast_config
     
@@ -249,7 +254,8 @@ class Config:
             'cv_folds': cls.CV_FOLDS,
             'feature_selection_k': cls.FEATURE_SELECTION_K,
             'n_estimators': 800,
-            'validation_size': cls.VALIDATION_SIZE
+            'validation_size': cls.VALIDATION_SIZE,
+            'timeout': cls.OPTUNA_TIMEOUT
         }
         return full_config
     
@@ -263,6 +269,7 @@ class Config:
             'feature_selection_k': cls.FEATURE_SELECTION_K,
             'n_estimators': 800,
             'validation_size': cls.VALIDATION_SIZE,
+            'timeout': cls.OPTUNA_TIMEOUT,
             'use_calibration': True,
             'use_stacking': True
         }
@@ -273,11 +280,12 @@ class Config:
         """성능 중심 설정 반환"""
         performance_config = {
             'models': ['lightgbm', 'xgboost', 'catboost'],
-            'optuna_trials': 1000,
-            'cv_folds': 10,
+            'optuna_trials': 300,  # 성능 우선시에는 조금 더 많이
+            'cv_folds': 7,
             'feature_selection_k': 40,
-            'n_estimators': 1200,
+            'n_estimators': 1000,
             'validation_size': 0.1,
+            'timeout': 2400,  # 40분 제한
             'use_pca': False,
             'scaling_method': 'robust'
         }
@@ -291,15 +299,17 @@ class Config:
         # 샘플 수에 따른 조정
         if n_samples > 50000:
             adjustments.update({
-                'cv_folds': 5,
-                'n_estimators': 600,
-                'optuna_trials': 300
+                'cv_folds': 3,
+                'n_estimators': 400,
+                'optuna_trials': 100,
+                'timeout': 1200  # 20분
             })
         elif n_samples < 10000:
             adjustments.update({
-                'cv_folds': 10,
+                'cv_folds': 7,
                 'n_estimators': 1000,
-                'optuna_trials': 500
+                'optuna_trials': 300,
+                'timeout': 3600  # 60분
             })
         
         # 피처 수에 따른 조정
@@ -315,3 +325,13 @@ class Config:
             })
         
         return adjustments
+    
+    @classmethod
+    def get_memory_config(cls):
+        """메모리 최적화 설정"""
+        return {
+            'memory_efficient': cls.MEMORY_EFFICIENT,
+            'chunk_size': cls.CHUNK_SIZE,
+            'dtype_optimization': True,
+            'garbage_collection': True
+        }

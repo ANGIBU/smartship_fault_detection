@@ -6,6 +6,7 @@ from sklearn.preprocessing import RobustScaler, StandardScaler, QuantileTransfor
 from sklearn.feature_selection import SelectKBest, mutual_info_classif, f_classif
 from sklearn.impute import SimpleImputer
 from sklearn.decomposition import PCA
+import gc
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -27,18 +28,16 @@ class DataProcessor:
         """데이터 로드 및 전처리"""
         print("=== 데이터 로드 및 전처리 시작 ===")
         
-        train_df = pd.read_csv(Config.TRAIN_FILE)
-        test_df = pd.read_csv(Config.TEST_FILE)
+        # 메모리 효율적 로드
+        train_df = pd.read_csv(Config.TRAIN_FILE, dtype={col: 'float32' for col in self.feature_columns})
+        test_df = pd.read_csv(Config.TEST_FILE, dtype={col: 'float32' for col in self.feature_columns})
         
         print(f"Train 데이터 형태: {train_df.shape}")
         print(f"Test 데이터 형태: {test_df.shape}")
         
-        # float64 정밀도 유지 (성능 우선)
-        for col in self.feature_columns:
-            if col in train_df.columns:
-                train_df[col] = train_df[col].astype('float64')
-            if col in test_df.columns:
-                test_df[col] = test_df[col].astype('float64')
+        # 타겟 컬럼은 정확도를 위해 int32 유지
+        if Config.TARGET_COLUMN in train_df.columns:
+            train_df[Config.TARGET_COLUMN] = train_df[Config.TARGET_COLUMN].astype('int32')
         
         train_quality = check_data_quality(train_df, self.feature_columns)
         test_quality = check_data_quality(test_df, self.feature_columns)
@@ -50,30 +49,28 @@ class DataProcessor:
         return train_df, test_df
     
     def _handle_data_issues(self, train_df, test_df):
-        """데이터 이슈 처리"""
+        """데이터 이슈 통합 처리"""
         print("데이터 이슈 처리 중...")
         
+        # 결측치와 무한값을 한 번에 처리
         for col in self.feature_columns:
-            if train_df[col].isnull().sum() > 0:
-                # 센서 특성을 고려한 결측치 처리
-                if train_df[col].std() > 0.1:  # 고분산 센서
-                    fill_val = train_df[col].median()
-                else:  # 저분산 센서
-                    fill_val = train_df[col].mean()
-                    
-                train_df[col].fillna(fill_val, inplace=True)
-                test_df[col].fillna(fill_val, inplace=True)
-                print(f"{col} 결측치 처리: {fill_val:.6f}")
-        
-        # 무한값을 센서별 99.9% 분위수로 대체
-        for col in self.feature_columns:
+            # 무한값을 NaN으로 변환
             train_df[col] = train_df[col].replace([np.inf, -np.inf], np.nan)
             test_df[col] = test_df[col].replace([np.inf, -np.inf], np.nan)
             
+            # 결측치가 있는 경우
             if train_df[col].isnull().sum() > 0:
-                clip_val = train_df[col].quantile(0.999)
-                train_df[col].fillna(clip_val, inplace=True)
-                test_df[col].fillna(clip_val, inplace=True)
+                if train_df[col].std() > 0.1:
+                    fill_val = train_df[col].median()
+                else:
+                    fill_val = train_df[col].mean()
+                
+                # 결측치가 여전히 발생하면 0으로 대체
+                if pd.isna(fill_val):
+                    fill_val = 0.0
+                    
+                train_df[col].fillna(fill_val, inplace=True)
+                test_df[col].fillna(fill_val, inplace=True)
         
         return train_df, test_df
     
@@ -81,97 +78,110 @@ class DataProcessor:
         """센서 데이터 상관관계 기반 그룹화"""
         print("센서 상관관계 분석 중...")
         
+        # 메모리 효율적 상관관계 계산
         corr_matrix = train_df[self.feature_columns].corr().abs()
         
-        # 고상관 센서 쌍 식별 (0.8 이상)
+        # 고상관 센서 쌍 식별
         high_corr_pairs = []
-        for i in range(len(self.feature_columns)):
-            for j in range(i+1, len(self.feature_columns)):
-                if corr_matrix.iloc[i, j] > 0.8:
+        n_features = len(self.feature_columns)
+        
+        for i in range(n_features):
+            for j in range(i+1, n_features):
+                corr_val = corr_matrix.iloc[i, j]
+                if corr_val > 0.8:
                     high_corr_pairs.append((
                         self.feature_columns[i], 
                         self.feature_columns[j],
-                        corr_matrix.iloc[i, j]
+                        corr_val
                     ))
         
-        self.high_corr_pairs = high_corr_pairs[:10]  # 상위 10개만 사용
+        # 상위 10개만 사용하여 메모리 절약
+        self.high_corr_pairs = sorted(high_corr_pairs, key=lambda x: x[2], reverse=True)[:10]
         print(f"고상관 센서 쌍: {len(self.high_corr_pairs)}개")
         
         # 분산 기반 센서 분류
         variances = train_df[self.feature_columns].var()
-        self.high_var_sensors = variances[variances > variances.quantile(0.7)].index.tolist()
-        self.low_var_sensors = variances[variances <= variances.quantile(0.3)].index.tolist()
+        high_var_threshold = variances.quantile(0.7)
+        low_var_threshold = variances.quantile(0.3)
+        
+        self.high_var_sensors = variances[variances > high_var_threshold].index.tolist()
+        self.low_var_sensors = variances[variances <= low_var_threshold].index.tolist()
         
         print(f"고분산 센서: {len(self.high_var_sensors)}개")
         print(f"저분산 센서: {len(self.low_var_sensors)}개")
+        
+        # 메모리 정리
+        del corr_matrix, variances
+        gc.collect()
     
     @timer
     def feature_engineering(self, train_df, test_df):
-        """피처 엔지니어링 - 단순화 및 정밀화"""
+        """피처 엔지니어링"""
         print("=== 피처 엔지니어링 시작 ===")
         
+        # 메모리 효율적 복사
         X_train = train_df[self.feature_columns].copy()
         X_test = test_df[self.feature_columns].copy()
-        y_train = train_df[Config.TARGET_COLUMN]
+        y_train = train_df[Config.TARGET_COLUMN].copy()
         
         # 센서 그룹 분석
         self._calculate_sensor_groups(train_df)
         
-        # 선별된 통계 피처만 생성
-        X_train, X_test = self._create_selective_features(X_train, X_test)
+        # 통계 피처 생성
+        X_train, X_test = self._create_statistical_features(X_train, X_test)
         
-        # 센서 간 상호작용 피처 (고상관 쌍만)
+        # 상호작용 피처 생성
         X_train, X_test = self._create_interaction_features(X_train, X_test)
         
-        # 최종 정리
+        # 최종 데이터 정리
         X_train, X_test = self._final_cleanup(X_train, X_test)
         
         return X_train, X_test, y_train
     
-    def _create_selective_features(self, X_train, X_test):
-        """선별적 통계 피처 생성"""
-        print("선별적 통계 피처 생성 중...")
+    def _create_statistical_features(self, X_train, X_test):
+        """통계 피처 생성"""
+        print("통계 피처 생성 중...")
         
-        # 핵심 통계량만 생성 (중복 최소화)
-        X_train['sensor_mean'] = X_train[self.feature_columns].mean(axis=1)
-        X_train['sensor_std'] = X_train[self.feature_columns].std(axis=1)
-        X_train['sensor_range'] = X_train[self.feature_columns].max(axis=1) - X_train[self.feature_columns].min(axis=1)
-        X_train['sensor_skew'] = X_train[self.feature_columns].skew(axis=1)
+        # 기본 통계량
+        feature_arrays = [X_train[self.feature_columns].values, X_test[self.feature_columns].values]
         
-        X_test['sensor_mean'] = X_test[self.feature_columns].mean(axis=1)
-        X_test['sensor_std'] = X_test[self.feature_columns].std(axis=1)
-        X_test['sensor_range'] = X_test[self.feature_columns].max(axis=1) - X_test[self.feature_columns].min(axis=1)
-        X_test['sensor_skew'] = X_test[self.feature_columns].skew(axis=1)
-        
-        # 분산 그룹별 통계
-        if len(self.high_var_sensors) > 0:
-            X_train['high_var_mean'] = X_train[self.high_var_sensors].mean(axis=1)
-            X_test['high_var_mean'] = X_test[self.high_var_sensors].mean(axis=1)
+        for i, (X, data_name) in enumerate([(X_train, 'train'), (X_test, 'test')]):
+            arr = feature_arrays[i]
             
-        if len(self.low_var_sensors) > 0:
-            X_train['low_var_mean'] = X_train[self.low_var_sensors].mean(axis=1)
-            X_test['low_var_mean'] = X_test[self.low_var_sensors].mean(axis=1)
+            # 벡터화된 연산으로 성능 향상
+            X['sensor_mean'] = np.mean(arr, axis=1).astype('float32')
+            X['sensor_std'] = np.std(arr, axis=1).astype('float32')
+            X['sensor_range'] = (np.max(arr, axis=1) - np.min(arr, axis=1)).astype('float32')
+            
+            # 분산 그룹별 통계
+            if len(self.high_var_sensors) > 0:
+                high_var_data = X[self.high_var_sensors].values
+                X['high_var_mean'] = np.mean(high_var_data, axis=1).astype('float32')
+                
+            if len(self.low_var_sensors) > 0:
+                low_var_data = X[self.low_var_sensors].values
+                X['low_var_mean'] = np.mean(low_var_data, axis=1).astype('float32')
         
         return X_train, X_test
     
     def _create_interaction_features(self, X_train, X_test):
-        """상관관계 기반 상호작용 피처"""
+        """상호작용 피처 생성"""
         print("상호작용 피처 생성 중...")
         
-        # 고상관 센서 쌍의 상호작용만 생성
-        for s1, s2, corr in self.high_corr_pairs[:5]:  # 상위 5개만
-            # 비율 피처 (분모 보정 정밀화)
-            ratio_name = f'ratio_{s1}_{s2}'
-            denominator = X_train[s2].abs() + 1e-10  # 더 안전한 보정값
-            X_train[ratio_name] = X_train[s1] / denominator
+        # 상위 5개 고상관 센서 쌍만 사용
+        for s1, s2, corr in self.high_corr_pairs[:5]:
+            # 안전한 나눗셈을 위한 보정
+            eps = 1e-8
             
-            denominator_test = X_test[s2].abs() + 1e-10
-            X_test[ratio_name] = X_test[s1] / denominator_test
+            # 비율 피처
+            ratio_name = f'ratio_{s1}_{s2}'
+            X_train[ratio_name] = (X_train[s1] / (X_train[s2].abs() + eps)).astype('float32')
+            X_test[ratio_name] = (X_test[s1] / (X_test[s2].abs() + eps)).astype('float32')
             
             # 차분 피처
             diff_name = f'diff_{s1}_{s2}'
-            X_train[diff_name] = X_train[s1] - X_train[s2]
-            X_test[diff_name] = X_test[s1] - X_test[s2]
+            X_train[diff_name] = (X_train[s1] - X_train[s2]).astype('float32')
+            X_test[diff_name] = (X_test[s1] - X_test[s2]).astype('float32')
         
         return X_train, X_test
     
@@ -179,33 +189,30 @@ class DataProcessor:
         """최종 데이터 정리"""
         print("최종 데이터 정리 중...")
         
-        # 무한값 및 NaN 처리
-        X_train = X_train.replace([np.inf, -np.inf], np.nan)
-        X_test = X_test.replace([np.inf, -np.inf], np.nan)
-        
-        # 훈련 데이터 기준 결측치 처리
-        for col in X_train.columns:
-            if X_train[col].isna().any():
-                if X_train[col].dtype in ['float64', 'float32']:
-                    fill_val = X_train[col].median()
-                else:
-                    fill_val = 0
-                    
-                if pd.isna(fill_val):
-                    fill_val = 0
-                    
-                X_train[col].fillna(fill_val, inplace=True)
-                X_test[col].fillna(fill_val, inplace=True)
+        # 무한값과 NaN을 한 번에 처리
+        for df in [X_train, X_test]:
+            # 무한값을 NaN으로 변환
+            df.replace([np.inf, -np.inf], np.nan, inplace=True)
+            
+            # NaN을 0으로 대체 (이미 검증된 데이터이므로 단순 처리)
+            df.fillna(0, inplace=True)
+            
+            # 데이터 타입 최적화
+            for col in df.select_dtypes(include=['float64']).columns:
+                df[col] = df[col].astype('float32')
         
         print(f"정리 후 훈련 데이터 NaN: {X_train.isna().sum().sum()}")
         print(f"정리 후 테스트 데이터 NaN: {X_test.isna().sum().sum()}")
         print(f"생성된 피처 수: {X_train.shape[1]}")
         
+        # 메모리 정리
+        gc.collect()
+        
         return X_train, X_test
     
     @timer
     def scale_features(self, X_train, X_test, method='robust'):
-        """피처 스케일링 - 다중 방법 지원"""
+        """피처 스케일링"""
         print(f"=== 피처 스케일링 시작 ({method}) ===")
         
         if method == 'robust':
@@ -217,20 +224,22 @@ class DataProcessor:
         else:
             self.scaler = RobustScaler()
         
-        # 훈련 데이터만으로 fit
+        # 메모리 효율적 스케일링
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
-        # DataFrame 변환
+        # DataFrame 변환 (인덱스 유지)
         X_train_scaled = pd.DataFrame(
             X_train_scaled, 
             columns=X_train.columns, 
-            index=X_train.index
+            index=X_train.index,
+            dtype='float32'
         )
         X_test_scaled = pd.DataFrame(
             X_test_scaled, 
             columns=X_test.columns, 
-            index=X_test.index
+            index=X_test.index,
+            dtype='float32'
         )
         
         save_joblib(self.scaler, Config.SCALER_FILE)
@@ -239,9 +248,11 @@ class DataProcessor:
     
     @timer
     def select_features(self, X_train, X_test, y_train, method='mutual_info', k=None):
-        """피처 선택 - 다중 방법 조합"""
+        """피처 선택"""
         if k is None:
             k = Config.FEATURE_SELECTION_K
+        
+        k = min(k, X_train.shape[1])  # 피처 수를 초과하지 않도록 제한
         
         print(f"=== 피처 선택 시작 ({method}, k={k}) ===")
         print(f"원본 피처 개수: {X_train.shape[1]}")
@@ -255,7 +266,7 @@ class DataProcessor:
         
         self.feature_selector = selector
         
-        # 훈련 데이터만으로 fit
+        # 피처 선택 수행
         X_train_selected = self.feature_selector.fit_transform(X_train, y_train)
         X_test_selected = self.feature_selector.transform(X_test)
         
@@ -264,18 +275,24 @@ class DataProcessor:
         
         print(f"선택된 피처 개수: {len(self.selected_features)}")
         
+        # DataFrame 변환
         X_train_selected = pd.DataFrame(
             X_train_selected, 
             columns=self.selected_features, 
-            index=X_train.index
+            index=X_train.index,
+            dtype='float32'
         )
         X_test_selected = pd.DataFrame(
             X_test_selected, 
             columns=self.selected_features, 
-            index=X_test.index
+            index=X_test.index,
+            dtype='float32'
         )
         
         save_joblib(self.feature_selector, Config.FEATURE_SELECTOR_FILE)
+        
+        # 메모리 정리
+        gc.collect()
         
         return X_train_selected, X_test_selected
     
@@ -300,12 +317,14 @@ class DataProcessor:
         X_train_pca = pd.DataFrame(
             X_train_pca,
             columns=pca_columns,
-            index=X_train.index
+            index=X_train.index,
+            dtype='float32'
         )
         X_test_pca = pd.DataFrame(
             X_test_pca,
             columns=pca_columns,
-            index=X_test.index
+            index=X_test.index,
+            dtype='float32'
         )
         
         save_joblib(self.pca, Config.PCA_FILE)
@@ -316,41 +335,63 @@ class DataProcessor:
         """전체 전처리 파이프라인 실행"""
         print("=== 전체 데이터 전처리 파이프라인 시작 ===")
         
-        # 1. 데이터 로드
-        train_df, test_df = self.load_and_preprocess_data()
-        
-        # 2. 피처 엔지니어링
-        X_train, X_test, y_train = self.feature_engineering(train_df, test_df)
-        
-        # 3. 스케일링
-        X_train, X_test = self.scale_features(X_train, X_test, scaling_method)
-        
-        # 4. 피처 선택
-        if use_feature_selection:
-            X_train, X_test = self.select_features(
-                X_train, X_test, y_train, 
-                method='mutual_info', 
-                k=min(Config.FEATURE_SELECTION_K, X_train.shape[1])
-            )
-        
-        # 5. PCA (선택적)
-        if use_pca:
-            X_train, X_test = self.apply_pca(X_train, X_test, n_components=0.95)
-        
-        # 6. 최종 검증
-        print("=== 최종 데이터 검증 ===")
-        final_nan_train = X_train.isna().sum().sum()
-        final_nan_test = X_test.isna().sum().sum()
-        
-        print(f"최종 훈련 데이터 NaN: {final_nan_train}")
-        print(f"최종 테스트 데이터 NaN: {final_nan_test}")
-        
-        if final_nan_train > 0 or final_nan_test > 0:
-            X_train = X_train.fillna(0)
-            X_test = X_test.fillna(0)
-            print("잔여 NaN을 0으로 대체")
-        
-        print(f"최종 피처 개수: {X_train.shape[1]}")
-        print(f"최종 데이터 형태 - 훈련: {X_train.shape}, 테스트: {X_test.shape}")
-        
-        return X_train, X_test, y_train, train_df[Config.ID_COLUMN], test_df[Config.ID_COLUMN]
+        try:
+            # 1. 데이터 로드
+            train_df, test_df = self.load_and_preprocess_data()
+            
+            # 2. 피처 엔지니어링
+            X_train, X_test, y_train = self.feature_engineering(train_df, test_df)
+            
+            # 메모리 정리
+            del train_df, test_df
+            gc.collect()
+            
+            # 3. 스케일링
+            X_train, X_test = self.scale_features(X_train, X_test, scaling_method)
+            
+            # 4. 피처 선택
+            if use_feature_selection:
+                available_features = min(Config.FEATURE_SELECTION_K, X_train.shape[1])
+                X_train, X_test = self.select_features(
+                    X_train, X_test, y_train, 
+                    method='mutual_info', 
+                    k=available_features
+                )
+            
+            # 5. PCA (선택적)
+            if use_pca:
+                X_train, X_test = self.apply_pca(X_train, X_test, n_components=0.95)
+            
+            # 6. 최종 검증 및 정리
+            print("=== 최종 데이터 검증 ===")
+            
+            # NaN 체크
+            train_nan_count = X_train.isna().sum().sum()
+            test_nan_count = X_test.isna().sum().sum()
+            
+            print(f"최종 훈련 데이터 NaN: {train_nan_count}")
+            print(f"최종 테스트 데이터 NaN: {test_nan_count}")
+            
+            # 남은 NaN 처리
+            if train_nan_count > 0 or test_nan_count > 0:
+                X_train.fillna(0, inplace=True)
+                X_test.fillna(0, inplace=True)
+                print("잔여 NaN을 0으로 대체")
+            
+            print(f"최종 피처 개수: {X_train.shape[1]}")
+            print(f"최종 데이터 형태 - 훈련: {X_train.shape}, 테스트: {X_test.shape}")
+            
+            # 메모리 최종 정리
+            gc.collect()
+            
+            # ID 컬럼 반환을 위한 원본 로드 (메모리 효율적)
+            train_ids = pd.read_csv(Config.TRAIN_FILE, usecols=[Config.ID_COLUMN])[Config.ID_COLUMN]
+            test_ids = pd.read_csv(Config.TEST_FILE, usecols=[Config.ID_COLUMN])[Config.ID_COLUMN]
+            
+            return X_train, X_test, y_train, train_ids, test_ids
+            
+        except Exception as e:
+            print(f"데이터 전처리 중 오류 발생: {e}")
+            # 메모리 정리
+            gc.collect()
+            raise
