@@ -2,20 +2,22 @@
 
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import RobustScaler
-from sklearn.feature_selection import SelectKBest, mutual_info_classif
+from sklearn.preprocessing import RobustScaler, StandardScaler, QuantileTransformer
+from sklearn.feature_selection import SelectKBest, mutual_info_classif, f_classif
 from sklearn.impute import SimpleImputer
+from sklearn.decomposition import PCA
 import warnings
 warnings.filterwarnings('ignore')
 
 from config import Config
-from utils import timer, check_data_quality, optimize_memory_usage, save_joblib
+from utils import timer, check_data_quality, save_joblib
 
 class DataProcessor:
     def __init__(self):
         self.scaler = None
         self.feature_selector = None
         self.imputer = None
+        self.pca = None
         self.feature_columns = Config.FEATURE_COLUMNS
         self.selected_features = None
         self.train_stats = {}
@@ -31,8 +33,12 @@ class DataProcessor:
         print(f"Train 데이터 형태: {train_df.shape}")
         print(f"Test 데이터 형태: {test_df.shape}")
         
-        train_df = optimize_memory_usage(train_df)
-        test_df = optimize_memory_usage(test_df)
+        # float64 정밀도 유지 (성능 우선)
+        for col in self.feature_columns:
+            if col in train_df.columns:
+                train_df[col] = train_df[col].astype('float64')
+            if col in test_df.columns:
+                test_df[col] = test_df[col].astype('float64')
         
         train_quality = check_data_quality(train_df, self.feature_columns)
         test_quality = check_data_quality(test_df, self.feature_columns)
@@ -47,172 +53,125 @@ class DataProcessor:
         """데이터 이슈 처리"""
         print("데이터 이슈 처리 중...")
         
-        # 훈련 데이터만으로 결측치 처리
         for col in self.feature_columns:
             if train_df[col].isnull().sum() > 0:
-                median_val = train_df[col].median()
-                train_df[col].fillna(median_val, inplace=True)
-                test_df[col].fillna(median_val, inplace=True)
-                print(f"{col} 결측치 {median_val}로 대체")
+                # 센서 특성을 고려한 결측치 처리
+                if train_df[col].std() > 0.1:  # 고분산 센서
+                    fill_val = train_df[col].median()
+                else:  # 저분산 센서
+                    fill_val = train_df[col].mean()
+                    
+                train_df[col].fillna(fill_val, inplace=True)
+                test_df[col].fillna(fill_val, inplace=True)
+                print(f"{col} 결측치 처리: {fill_val:.6f}")
         
-        # 무한값 처리
+        # 무한값을 센서별 99.9% 분위수로 대체
         for col in self.feature_columns:
             train_df[col] = train_df[col].replace([np.inf, -np.inf], np.nan)
             test_df[col] = test_df[col].replace([np.inf, -np.inf], np.nan)
             
             if train_df[col].isnull().sum() > 0:
-                median_val = train_df[col].median()
-                train_df[col].fillna(median_val, inplace=True)
-                test_df[col].fillna(median_val, inplace=True)
+                clip_val = train_df[col].quantile(0.999)
+                train_df[col].fillna(clip_val, inplace=True)
+                test_df[col].fillna(clip_val, inplace=True)
         
         return train_df, test_df
     
-    def _calculate_train_stats(self, train_df):
-        """훈련 데이터만으로 통계 계산"""
-        print("훈련 데이터 통계 계산 중...")
+    def _calculate_sensor_groups(self, train_df):
+        """센서 데이터 상관관계 기반 그룹화"""
+        print("센서 상관관계 분석 중...")
         
-        for col in self.feature_columns:
-            stats = {
-                'mean': train_df[col].mean(),
-                'std': train_df[col].std(),
-                'median': train_df[col].median(),
-                'q25': train_df[col].quantile(0.25),
-                'q75': train_df[col].quantile(0.75),
-                'min': train_df[col].min(),
-                'max': train_df[col].max()
-            }
-            self.train_stats[col] = stats
+        corr_matrix = train_df[self.feature_columns].corr().abs()
         
-        # 분산 기반 피처 그룹화
-        high_var = []
-        low_var = []
+        # 고상관 센서 쌍 식별 (0.8 이상)
+        high_corr_pairs = []
+        for i in range(len(self.feature_columns)):
+            for j in range(i+1, len(self.feature_columns)):
+                if corr_matrix.iloc[i, j] > 0.8:
+                    high_corr_pairs.append((
+                        self.feature_columns[i], 
+                        self.feature_columns[j],
+                        corr_matrix.iloc[i, j]
+                    ))
         
-        for col in self.feature_columns:
-            var_val = self.train_stats[col]['std']
-            if var_val > 0.1:
-                high_var.append(col)
-            else:
-                low_var.append(col)
+        self.high_corr_pairs = high_corr_pairs[:10]  # 상위 10개만 사용
+        print(f"고상관 센서 쌍: {len(self.high_corr_pairs)}개")
         
-        self.high_variance_features = high_var
-        self.low_variance_features = low_var
+        # 분산 기반 센서 분류
+        variances = train_df[self.feature_columns].var()
+        self.high_var_sensors = variances[variances > variances.quantile(0.7)].index.tolist()
+        self.low_var_sensors = variances[variances <= variances.quantile(0.3)].index.tolist()
         
-        print(f"고분산 피처: {len(high_var)}개")
-        print(f"저분산 피처: {len(low_var)}개")
+        print(f"고분산 센서: {len(self.high_var_sensors)}개")
+        print(f"저분산 센서: {len(self.low_var_sensors)}개")
     
     @timer
     def feature_engineering(self, train_df, test_df):
-        """피처 엔지니어링"""
+        """피처 엔지니어링 - 단순화 및 정밀화"""
         print("=== 피처 엔지니어링 시작 ===")
         
         X_train = train_df[self.feature_columns].copy()
         X_test = test_df[self.feature_columns].copy()
         y_train = train_df[Config.TARGET_COLUMN]
         
-        # 훈련 데이터 통계 계산
-        self._calculate_train_stats(train_df)
+        # 센서 그룹 분석
+        self._calculate_sensor_groups(train_df)
         
-        # 통계 피처 생성
-        X_train, X_test = self._create_statistical_features(X_train, X_test)
+        # 선별된 통계 피처만 생성
+        X_train, X_test = self._create_selective_features(X_train, X_test)
         
-        # 센서 상호작용 피처 생성
+        # 센서 간 상호작용 피처 (고상관 쌍만)
         X_train, X_test = self._create_interaction_features(X_train, X_test)
-        
-        # 그룹 피처 생성
-        X_train, X_test = self._create_group_features(X_train, X_test)
         
         # 최종 정리
         X_train, X_test = self._final_cleanup(X_train, X_test)
         
         return X_train, X_test, y_train
     
-    def _create_statistical_features(self, X_train, X_test):
-        """통계적 피처 생성"""
-        print("통계적 피처 생성 중...")
+    def _create_selective_features(self, X_train, X_test):
+        """선별적 통계 피처 생성"""
+        print("선별적 통계 피처 생성 중...")
         
-        # 기본 통계량
-        X_train['stat_mean'] = X_train[self.feature_columns].mean(axis=1)
-        X_train['stat_std'] = X_train[self.feature_columns].std(axis=1)
-        X_train['stat_max'] = X_train[self.feature_columns].max(axis=1)
-        X_train['stat_min'] = X_train[self.feature_columns].min(axis=1)
-        X_train['stat_range'] = X_train['stat_max'] - X_train['stat_min']
-        X_train['stat_median'] = X_train[self.feature_columns].median(axis=1)
+        # 핵심 통계량만 생성 (중복 최소화)
+        X_train['sensor_mean'] = X_train[self.feature_columns].mean(axis=1)
+        X_train['sensor_std'] = X_train[self.feature_columns].std(axis=1)
+        X_train['sensor_range'] = X_train[self.feature_columns].max(axis=1) - X_train[self.feature_columns].min(axis=1)
+        X_train['sensor_skew'] = X_train[self.feature_columns].skew(axis=1)
         
-        X_test['stat_mean'] = X_test[self.feature_columns].mean(axis=1)
-        X_test['stat_std'] = X_test[self.feature_columns].std(axis=1)
-        X_test['stat_max'] = X_test[self.feature_columns].max(axis=1)
-        X_test['stat_min'] = X_test[self.feature_columns].min(axis=1)
-        X_test['stat_range'] = X_test['stat_max'] - X_test['stat_min']
-        X_test['stat_median'] = X_test[self.feature_columns].median(axis=1)
+        X_test['sensor_mean'] = X_test[self.feature_columns].mean(axis=1)
+        X_test['sensor_std'] = X_test[self.feature_columns].std(axis=1)
+        X_test['sensor_range'] = X_test[self.feature_columns].max(axis=1) - X_test[self.feature_columns].min(axis=1)
+        X_test['sensor_skew'] = X_test[self.feature_columns].skew(axis=1)
         
-        # 분위수
-        for q in [0.25, 0.75]:
-            q_name = f'stat_q{int(q*100)}'
-            X_train[q_name] = X_train[self.feature_columns].quantile(q, axis=1)
-            X_test[q_name] = X_test[self.feature_columns].quantile(q, axis=1)
+        # 분산 그룹별 통계
+        if len(self.high_var_sensors) > 0:
+            X_train['high_var_mean'] = X_train[self.high_var_sensors].mean(axis=1)
+            X_test['high_var_mean'] = X_test[self.high_var_sensors].mean(axis=1)
+            
+        if len(self.low_var_sensors) > 0:
+            X_train['low_var_mean'] = X_train[self.low_var_sensors].mean(axis=1)
+            X_test['low_var_mean'] = X_test[self.low_var_sensors].mean(axis=1)
         
         return X_train, X_test
     
     def _create_interaction_features(self, X_train, X_test):
-        """센서 상호작용 피처 생성"""
-        print("센서 상호작용 피처 생성 중...")
+        """상관관계 기반 상호작용 피처"""
+        print("상호작용 피처 생성 중...")
         
-        # 주요 센서 간 비율
-        pairs = [
-            ('X_01', 'X_02'), ('X_03', 'X_04'), ('X_05', 'X_06'),
-            ('X_07', 'X_08'), ('X_09', 'X_10'), ('X_11', 'X_12')
-        ]
-        
-        for s1, s2 in pairs:
-            if s1 in X_train.columns and s2 in X_train.columns:
-                # 비율 피처
-                ratio_name = f'ratio_{s1}_{s2}'
-                X_train[ratio_name] = X_train[s1] / (X_train[s2].abs() + 1e-8)
-                X_test[ratio_name] = X_test[s1] / (X_test[s2].abs() + 1e-8)
-                
-                # 차분 피처
-                diff_name = f'diff_{s1}_{s2}'
-                X_train[diff_name] = X_train[s1] - X_train[s2]
-                X_test[diff_name] = X_test[s1] - X_test[s2]
-                
-                # 곱셈 피처
-                mult_name = f'mult_{s1}_{s2}'
-                X_train[mult_name] = X_train[s1] * X_train[s2]
-                X_test[mult_name] = X_test[s1] * X_test[s2]
-        
-        # 고분산 피처들 간 상호작용
-        if len(self.high_variance_features) >= 2:
-            for i in range(min(3, len(self.high_variance_features))):
-                for j in range(i+1, min(4, len(self.high_variance_features))):
-                    f1, f2 = self.high_variance_features[i], self.high_variance_features[j]
-                    
-                    interact_name = f'interact_{f1}_{f2}'
-                    X_train[interact_name] = X_train[f1] * X_train[f2]
-                    X_test[interact_name] = X_test[f1] * X_test[f2]
-        
-        return X_train, X_test
-    
-    def _create_group_features(self, X_train, X_test):
-        """그룹별 피처 생성"""
-        print("그룹별 피처 생성 중...")
-        
-        # 10개씩 그룹화
-        group_size = 10
-        for i in range(0, len(self.feature_columns), group_size):
-            end_idx = min(i + group_size, len(self.feature_columns))
-            group_features = self.feature_columns[i:end_idx]
-            group_id = i // group_size + 1
+        # 고상관 센서 쌍의 상호작용만 생성
+        for s1, s2, corr in self.high_corr_pairs[:5]:  # 상위 5개만
+            # 비율 피처 (분모 보정 정밀화)
+            ratio_name = f'ratio_{s1}_{s2}'
+            denominator = X_train[s2].abs() + 1e-10  # 더 안전한 보정값
+            X_train[ratio_name] = X_train[s1] / denominator
             
-            # 그룹 통계
-            X_train[f'group{group_id}_mean'] = X_train[group_features].mean(axis=1)
-            X_train[f'group{group_id}_std'] = X_train[group_features].std(axis=1)
-            X_train[f'group{group_id}_max'] = X_train[group_features].max(axis=1)
-            X_train[f'group{group_id}_min'] = X_train[group_features].min(axis=1)
+            denominator_test = X_test[s2].abs() + 1e-10
+            X_test[ratio_name] = X_test[s1] / denominator_test
             
-            X_test[f'group{group_id}_mean'] = X_test[group_features].mean(axis=1)
-            X_test[f'group{group_id}_std'] = X_test[group_features].std(axis=1)
-            X_test[f'group{group_id}_max'] = X_test[group_features].max(axis=1)
-            X_test[f'group{group_id}_min'] = X_test[group_features].min(axis=1)
+            # 차분 피처
+            diff_name = f'diff_{s1}_{s2}'
+            X_train[diff_name] = X_train[s1] - X_train[s2]
+            X_test[diff_name] = X_test[s1] - X_test[s2]
         
         return X_train, X_test
     
@@ -224,26 +183,39 @@ class DataProcessor:
         X_train = X_train.replace([np.inf, -np.inf], np.nan)
         X_test = X_test.replace([np.inf, -np.inf], np.nan)
         
-        # 훈련 데이터 기준으로 결측치 처리
+        # 훈련 데이터 기준 결측치 처리
         for col in X_train.columns:
             if X_train[col].isna().any():
-                fill_val = X_train[col].median()
+                if X_train[col].dtype in ['float64', 'float32']:
+                    fill_val = X_train[col].median()
+                else:
+                    fill_val = 0
+                    
                 if pd.isna(fill_val):
                     fill_val = 0
+                    
                 X_train[col].fillna(fill_val, inplace=True)
                 X_test[col].fillna(fill_val, inplace=True)
         
         print(f"정리 후 훈련 데이터 NaN: {X_train.isna().sum().sum()}")
         print(f"정리 후 테스트 데이터 NaN: {X_test.isna().sum().sum()}")
+        print(f"생성된 피처 수: {X_train.shape[1]}")
         
         return X_train, X_test
     
     @timer
-    def scale_features(self, X_train, X_test):
-        """피처 스케일링"""
-        print("=== 피처 스케일링 시작 ===")
+    def scale_features(self, X_train, X_test, method='robust'):
+        """피처 스케일링 - 다중 방법 지원"""
+        print(f"=== 피처 스케일링 시작 ({method}) ===")
         
-        self.scaler = RobustScaler()
+        if method == 'robust':
+            self.scaler = RobustScaler()
+        elif method == 'standard':
+            self.scaler = StandardScaler()
+        elif method == 'quantile':
+            self.scaler = QuantileTransformer(output_distribution='normal', random_state=Config.RANDOM_STATE)
+        else:
+            self.scaler = RobustScaler()
         
         # 훈련 데이터만으로 fit
         X_train_scaled = self.scaler.fit_transform(X_train)
@@ -267,7 +239,7 @@ class DataProcessor:
     
     @timer
     def select_features(self, X_train, X_test, y_train, method='mutual_info', k=None):
-        """피처 선택"""
+        """피처 선택 - 다중 방법 조합"""
         if k is None:
             k = Config.FEATURE_SELECTION_K
         
@@ -275,10 +247,13 @@ class DataProcessor:
         print(f"원본 피처 개수: {X_train.shape[1]}")
         
         if method == 'mutual_info':
-            self.feature_selector = SelectKBest(mutual_info_classif, k=k)
+            selector = SelectKBest(mutual_info_classif, k=k)
+        elif method == 'f_classif':
+            selector = SelectKBest(f_classif, k=k)
         else:
-            from sklearn.feature_selection import f_classif
-            self.feature_selector = SelectKBest(f_classif, k=k)
+            selector = SelectKBest(mutual_info_classif, k=k)
+        
+        self.feature_selector = selector
         
         # 훈련 데이터만으로 fit
         X_train_selected = self.feature_selector.fit_transform(X_train, y_train)
@@ -304,7 +279,40 @@ class DataProcessor:
         
         return X_train_selected, X_test_selected
     
-    def get_processed_data(self, use_feature_selection=True):
+    @timer
+    def apply_pca(self, X_train, X_test, n_components=0.95):
+        """PCA 차원 축소"""
+        print(f"=== PCA 적용 시작 (n_components={n_components}) ===")
+        
+        self.pca = PCA(n_components=n_components, random_state=Config.RANDOM_STATE)
+        
+        X_train_pca = self.pca.fit_transform(X_train)
+        X_test_pca = self.pca.transform(X_test)
+        
+        n_components_actual = X_train_pca.shape[1]
+        explained_variance = self.pca.explained_variance_ratio_.sum()
+        
+        print(f"실제 컴포넌트 수: {n_components_actual}")
+        print(f"설명 분산 비율: {explained_variance:.4f}")
+        
+        pca_columns = [f'pca_{i}' for i in range(n_components_actual)]
+        
+        X_train_pca = pd.DataFrame(
+            X_train_pca,
+            columns=pca_columns,
+            index=X_train.index
+        )
+        X_test_pca = pd.DataFrame(
+            X_test_pca,
+            columns=pca_columns,
+            index=X_test.index
+        )
+        
+        save_joblib(self.pca, Config.PCA_FILE)
+        
+        return X_train_pca, X_test_pca
+    
+    def get_processed_data(self, use_feature_selection=True, use_pca=False, scaling_method='robust'):
         """전체 전처리 파이프라인 실행"""
         print("=== 전체 데이터 전처리 파이프라인 시작 ===")
         
@@ -315,17 +323,21 @@ class DataProcessor:
         X_train, X_test, y_train = self.feature_engineering(train_df, test_df)
         
         # 3. 스케일링
-        X_train, X_test = self.scale_features(X_train, X_test)
+        X_train, X_test = self.scale_features(X_train, X_test, scaling_method)
         
         # 4. 피처 선택
         if use_feature_selection:
             X_train, X_test = self.select_features(
                 X_train, X_test, y_train, 
                 method='mutual_info', 
-                k=Config.FEATURE_SELECTION_K
+                k=min(Config.FEATURE_SELECTION_K, X_train.shape[1])
             )
         
-        # 5. 최종 검증
+        # 5. PCA (선택적)
+        if use_pca:
+            X_train, X_test = self.apply_pca(X_train, X_test, n_components=0.95)
+        
+        # 6. 최종 검증
         print("=== 최종 데이터 검증 ===")
         final_nan_train = X_train.isna().sum().sum()
         final_nan_test = X_test.isna().sum().sum()

@@ -2,11 +2,16 @@
 
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier, StackingClassifier
+from sklearn.linear_model import LogisticRegression, RidgeClassifier
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import StratifiedKFold, cross_val_score, TimeSeriesSplit
 from sklearn.metrics import f1_score, make_scorer
-from sklearn.utils.class_weight import compute_class_weight
+from sklearn.utils.class_weight import compute_class_weight, compute_sample_weight
+from sklearn.calibration import CalibratedClassifierCV
 import lightgbm as lgb
 import xgboost as xgb
 import optuna
@@ -24,7 +29,17 @@ class ModelTraining:
         self.cv_scores = {}
         self.logger = setup_logging()
         self.scorer = make_scorer(f1_score, average='macro')
+        self.calibrated_models = {}
         
+    def _create_cv_strategy(self, X, y, cv_type='stratified'):
+        """교차 검증 전략 생성"""
+        if cv_type == 'stratified':
+            return StratifiedKFold(n_splits=Config.CV_FOLDS, shuffle=True, random_state=Config.RANDOM_STATE)
+        elif cv_type == 'time_series':
+            return TimeSeriesSplit(n_splits=Config.CV_FOLDS)
+        else:
+            return StratifiedKFold(n_splits=Config.CV_FOLDS, shuffle=True, random_state=Config.RANDOM_STATE)
+    
     @timer
     def train_lightgbm(self, X_train, y_train, X_val=None, y_val=None, params=None):
         """LightGBM 모델 훈련"""
@@ -44,7 +59,7 @@ class ModelTraining:
         if X_val is not None and y_val is not None:
             eval_set = [(X_val, y_val)]
             eval_names = ['validation']
-            early_stopping_rounds = params.pop('early_stopping_rounds', 50)
+            early_stopping_rounds = params.pop('early_stopping_rounds', 100)
             callbacks = [lgb.early_stopping(early_stopping_rounds, verbose=0)]
         else:
             eval_set = None
@@ -81,8 +96,7 @@ class ModelTraining:
         # 클래스 가중치 계산
         classes = np.unique(y_train)
         class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
-        weight_dict = dict(zip(classes, class_weights))
-        sample_weights = np.array([weight_dict[y] for y in y_train])
+        sample_weights = compute_sample_weight('balanced', y=y_train)
         
         # early_stopping_rounds 추출
         early_stopping_rounds = params.pop('early_stopping_rounds', None)
@@ -90,7 +104,6 @@ class ModelTraining:
         model = xgb.XGBClassifier(**params)
         
         if X_val is not None and y_val is not None and early_stopping_rounds:
-            # Validation 데이터가 있는 경우 early stopping 적용
             model.fit(
                 X_train, y_train, 
                 sample_weight=sample_weights,
@@ -99,7 +112,6 @@ class ModelTraining:
                 verbose=False
             )
         else:
-            # Validation 데이터가 없는 경우 일반 훈련
             model.fit(X_train, y_train, sample_weight=sample_weights)
         
         self.models['xgboost'] = model
@@ -115,22 +127,7 @@ class ModelTraining:
         try:
             from catboost import CatBoostClassifier
             
-            # 안전한 파라미터 설정
-            params = {
-                'iterations': 600,
-                'learning_rate': 0.08,
-                'depth': 8,
-                'l2_leaf_reg': 3,
-                'bootstrap_type': 'Bayesian',
-                'bagging_temperature': 1,
-                'sampling_frequency': 'PerTree',
-                'colsample_bylevel': 0.8,
-                'random_seed': Config.RANDOM_STATE,
-                'verbose': False,
-                'auto_class_weights': 'Balanced',
-                'thread_count': Config.N_JOBS if Config.N_JOBS > 0 else None,
-                'task_type': 'CPU'
-            }
+            params = Config.CATBOOST_PARAMS.copy()
             
             model = CatBoostClassifier(**params)
             
@@ -138,7 +135,7 @@ class ModelTraining:
                 model.fit(
                     X_train, y_train,
                     eval_set=(X_val, y_val),
-                    early_stopping_rounds=50,
+                    early_stopping_rounds=100,
                     use_best_model=True
                 )
             else:
@@ -176,7 +173,117 @@ class ModelTraining:
         return model
     
     @timer
-    def hyperparameter_optimization_optuna(self, X_train, y_train, model_type='lightgbm', n_trials=300):
+    def train_linear_models(self, X_train, y_train):
+        """선형 모델들 훈련"""
+        print("=== 선형 모델들 훈련 시작 ===")
+        
+        # Logistic Regression
+        lr_params = {
+            'multi_class': 'ovr',
+            'class_weight': 'balanced',
+            'random_state': Config.RANDOM_STATE,
+            'max_iter': 1000,
+            'n_jobs': Config.N_JOBS
+        }
+        
+        lr_model = LogisticRegression(**lr_params)
+        lr_model.fit(X_train, y_train)
+        self.models['logistic_regression'] = lr_model
+        
+        # Ridge Classifier
+        ridge_params = {
+            'class_weight': 'balanced',
+            'random_state': Config.RANDOM_STATE
+        }
+        
+        ridge_model = RidgeClassifier(**ridge_params)
+        ridge_model.fit(X_train, y_train)
+        self.models['ridge'] = ridge_model
+        
+        print("선형 모델들 훈련 완료")
+        return lr_model, ridge_model
+    
+    @timer
+    def train_svm(self, X_train, y_train):
+        """SVM 모델 훈련"""
+        print("=== SVM 모델 훈련 시작 ===")
+        
+        svm_params = {
+            'kernel': 'rbf',
+            'class_weight': 'balanced',
+            'random_state': Config.RANDOM_STATE,
+            'probability': True,  # 확률 예측을 위해
+            'cache_size': 1000  # 메모리 할당량 증가
+        }
+        
+        # 데이터 크기에 따라 C 값 조정
+        if X_train.shape[0] > 10000:
+            svm_params['C'] = 0.1  # 대용량 데이터에서는 낮은 C
+        else:
+            svm_params['C'] = 1.0
+        
+        model = SVC(**svm_params)
+        model.fit(X_train, y_train)
+        
+        self.models['svm'] = model
+        self.logger.info("SVM 모델 훈련 완료")
+        
+        return model
+    
+    @timer
+    def train_neural_network(self, X_train, y_train):
+        """신경망 모델 훈련"""
+        print("=== 신경망 모델 훈련 시작 ===")
+        
+        nn_params = {
+            'hidden_layer_sizes': (100, 50),
+            'activation': 'relu',
+            'solver': 'adam',
+            'alpha': 0.001,
+            'learning_rate': 'adaptive',
+            'max_iter': 500,
+            'random_state': Config.RANDOM_STATE,
+            'early_stopping': True,
+            'validation_fraction': 0.1
+        }
+        
+        model = MLPClassifier(**nn_params)
+        
+        # 클래스 가중치 적용
+        sample_weights = compute_sample_weight('balanced', y=y_train)
+        model.fit(X_train, y_train, sample_weight=sample_weights)
+        
+        self.models['neural_network'] = model
+        self.logger.info("신경망 모델 훈련 완료")
+        
+        return model
+    
+    @timer
+    def train_additional_models(self, X_train, y_train):
+        """추가 모델들 훈련"""
+        print("=== 추가 모델들 훈련 시작 ===")
+        
+        # K-Nearest Neighbors
+        knn_params = {
+            'n_neighbors': 5,
+            'weights': 'distance',
+            'n_jobs': Config.N_JOBS
+        }
+        
+        knn_model = KNeighborsClassifier(**knn_params)
+        knn_model.fit(X_train, y_train)
+        self.models['knn'] = knn_model
+        
+        # Gaussian Naive Bayes
+        nb_model = GaussianNB()
+        nb_model.fit(X_train, y_train)
+        self.models['naive_bayes'] = nb_model
+        
+        print("추가 모델들 훈련 완료")
+        return knn_model, nb_model
+    
+    @timer
+    def hyperparameter_optimization_optuna(self, X_train, y_train, model_type='lightgbm', n_trials=500):
         """하이퍼파라미터 튜닝"""
         print(f"=== {model_type} 하이퍼파라미터 튜닝 시작 ===")
         
@@ -189,17 +296,18 @@ class ModelTraining:
                     'boosting_type': 'gbdt',
                     'class_weight': 'balanced',
                     'is_unbalance': True,
-                    'num_leaves': trial.suggest_int('num_leaves', 30, 300),
-                    'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.3, log=True),
-                    'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
-                    'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
-                    'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
-                    'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
-                    'reg_alpha': trial.suggest_float('reg_alpha', 0, 10),
-                    'reg_lambda': trial.suggest_float('reg_lambda', 0, 10),
+                    'num_leaves': trial.suggest_int('num_leaves', 20, 500),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'feature_fraction': trial.suggest_float('feature_fraction', 0.5, 1.0),
+                    'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 1.0),
+                    'bagging_freq': trial.suggest_int('bagging_freq', 1, 10),
+                    'min_child_samples': trial.suggest_int('min_child_samples', 1, 200),
+                    'reg_alpha': trial.suggest_float('reg_alpha', 0, 20),
+                    'reg_lambda': trial.suggest_float('reg_lambda', 0, 20),
+                    'max_depth': trial.suggest_int('max_depth', 3, 15),
                     'verbose': -1,
                     'random_state': Config.RANDOM_STATE,
-                    'n_estimators': trial.suggest_int('n_estimators', 200, 1000),
+                    'n_estimators': trial.suggest_int('n_estimators', 100, 1500),
                     'n_jobs': Config.N_JOBS
                 }
                 model = lgb.LGBMClassifier(**params)
@@ -209,28 +317,25 @@ class ModelTraining:
                     'objective': 'multi:softprob',
                     'num_class': Config.N_CLASSES,
                     'eval_metric': 'mlogloss',
-                    'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.3, log=True),
-                    'max_depth': trial.suggest_int('max_depth', 3, 12),
-                    'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-                    'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-                    'reg_alpha': trial.suggest_float('reg_alpha', 0, 10),
-                    'reg_lambda': trial.suggest_float('reg_lambda', 0, 10),
-                    'gamma': trial.suggest_float('gamma', 0, 5),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'max_depth': trial.suggest_int('max_depth', 3, 15),
+                    'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+                    'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                    'reg_alpha': trial.suggest_float('reg_alpha', 0, 20),
+                    'reg_lambda': trial.suggest_float('reg_lambda', 0, 20),
+                    'gamma': trial.suggest_float('gamma', 0, 10),
+                    'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
                     'random_state': Config.RANDOM_STATE,
-                    'n_estimators': trial.suggest_int('n_estimators', 200, 1000),
+                    'n_estimators': trial.suggest_int('n_estimators', 100, 1500),
                     'n_jobs': Config.N_JOBS,
-                    'tree_method': 'hist'
+                    'tree_method': trial.suggest_categorical('tree_method', ['hist', 'exact', 'approx'])
                 }
                 
                 # 클래스 가중치 적용
-                classes = np.unique(y_train)
-                class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
-                weight_dict = dict(zip(classes, class_weights))
-                sample_weights = np.array([weight_dict[y] for y in y_train])
-                
+                sample_weights = compute_sample_weight('balanced', y=y_train)
                 model = xgb.XGBClassifier(**params)
                 
-                # 가중치 적용한 교차 검증
+                # 교차 검증에서 가중치 적용
                 cv_scores = []
                 skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=Config.RANDOM_STATE)
                 
@@ -254,8 +359,9 @@ class ModelTraining:
             )
             return cv_scores.mean()
         
+        # Optuna 최적화
         study = optuna.create_study(direction='maximize')
-        study.optimize(objective, n_trials=n_trials, timeout=1800, show_progress_bar=False)
+        study.optimize(objective, n_trials=n_trials, timeout=3600, show_progress_bar=False)
         
         print(f"최적 파라미터: {study.best_params}")
         print(f"최적 점수: {study.best_value:.4f}")
@@ -263,54 +369,64 @@ class ModelTraining:
         return study.best_params, study.best_value
     
     @timer
-    def cross_validation(self, X_train, y_train, cv_folds=None):
+    def cross_validation(self, X_train, y_train, cv_folds=None, cv_type='stratified'):
         """교차 검증 수행"""
         if cv_folds is None:
             cv_folds = Config.CV_FOLDS
         
         print("=== 교차 검증 시작 ===")
         
-        skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=Config.RANDOM_STATE)
+        cv_strategy = self._create_cv_strategy(X_train, y_train, cv_type)
         
         for model_name, model in self.models.items():
             print(f"\n{model_name} 교차 검증 중...")
             
-            # XGBoost는 가중치 적용한 별도 검증
-            if 'xgb' in str(type(model)).lower():
-                cv_scores = []
-                classes = np.unique(y_train)
-                class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
-                weight_dict = dict(zip(classes, class_weights))
+            try:
+                # XGBoost는 가중치 적용한 별도 검증
+                if 'xgb' in str(type(model)).lower():
+                    cv_scores = []
+                    sample_weights = compute_sample_weight('balanced', y=y_train)
+                    
+                    for train_idx, val_idx in cv_strategy.split(X_train, y_train):
+                        X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
+                        y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
+                        sw_tr = sample_weights[train_idx]
+                        
+                        # 모델 복사 및 훈련
+                        model_copy = xgb.XGBClassifier(**model.get_params())
+                        model_copy.fit(X_tr, y_tr, sample_weight=sw_tr)
+                        
+                        y_pred = model_copy.predict(X_val)
+                        score = f1_score(y_val, y_pred, average='macro')
+                        cv_scores.append(score)
+                    
+                    cv_scores = np.array(cv_scores)
+                    
+                # SVM이나 NN은 시간이 오래 걸리므로 3-fold로 축소
+                elif model_name in ['svm', 'neural_network']:
+                    cv_strategy_small = StratifiedKFold(n_splits=3, shuffle=True, random_state=Config.RANDOM_STATE)
+                    cv_scores = cross_val_score(
+                        model, X_train, y_train, 
+                        cv=cv_strategy_small, scoring=self.scorer, n_jobs=1
+                    )
+                else:
+                    # 일반 교차 검증
+                    cv_scores = cross_val_score(
+                        model, X_train, y_train, 
+                        cv=cv_strategy, scoring=self.scorer, n_jobs=1
+                    )
                 
-                for train_idx, val_idx in skf.split(X_train, y_train):
-                    X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
-                    y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
-                    
-                    sample_weights = np.array([weight_dict[y] for y in y_tr])
-                    
-                    # 모델 복사 및 훈련
-                    model_copy = xgb.XGBClassifier(**model.get_params())
-                    model_copy.fit(X_tr, y_tr, sample_weight=sample_weights)
-                    
-                    y_pred = model_copy.predict(X_val)
-                    score = f1_score(y_val, y_pred, average='macro')
-                    cv_scores.append(score)
+                self.cv_scores[model_name] = {
+                    'scores': cv_scores,
+                    'mean': cv_scores.mean(),
+                    'std': cv_scores.std()
+                }
                 
-                cv_scores = np.array(cv_scores)
-            else:
-                # 일반 교차 검증
-                cv_scores = cross_val_score(
-                    model, X_train, y_train, 
-                    cv=skf, scoring=self.scorer, n_jobs=1
-                )
-            
-            self.cv_scores[model_name] = {
-                'scores': cv_scores,
-                'mean': cv_scores.mean(),
-                'std': cv_scores.std()
-            }
-            
-            print(f"{model_name} CV 점수: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+                print(f"{model_name} CV 점수: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+                
+            except Exception as e:
+                print(f"{model_name} 교차 검증 실패: {e}")
+                continue
         
         # 최고 성능 모델 선택
         if self.cv_scores:
@@ -324,23 +440,79 @@ class ModelTraining:
         return self.cv_scores
     
     @timer
-    def create_simple_ensemble(self, X_train, y_train):
-        """간단한 앙상블 생성"""
-        print("=== 간단한 앙상블 생성 시작 ===")
+    def create_stacking_ensemble(self, X_train, y_train):
+        """스태킹 앙상블 생성"""
+        print("=== 스태킹 앙상블 생성 시작 ===")
         
-        # 성능 기준 모델 선택 (CV 점수 0.72 이상)
+        # 성능 기준 모델 선택 (CV 점수 0.70 이상)
+        good_models = []
+        for name, model in self.models.items():
+            if name in self.cv_scores and self.cv_scores[name]['mean'] >= 0.70:
+                # 확률 예측 가능한 모델만 선택
+                if hasattr(model, 'predict_proba') or hasattr(model, 'decision_function'):
+                    good_models.append((name, model))
+        
+        if len(good_models) < 2:
+            # 기준 완화하여 상위 5개 모델 선택
+            sorted_models = sorted(self.cv_scores.items(), key=lambda x: x[1]['mean'], reverse=True)
+            good_models = []
+            for name, _ in sorted_models[:5]:
+                if name in self.models:
+                    model = self.models[name]
+                    if hasattr(model, 'predict_proba') or hasattr(model, 'decision_function'):
+                        good_models.append((name, model))
+        
+        if len(good_models) >= 2:
+            print(f"스태킹에 사용할 모델: {[name for name, _ in good_models]}")
+            
+            try:
+                # 메타 모델로 LogisticRegression 사용
+                meta_model = LogisticRegression(
+                    multi_class='ovr',
+                    class_weight='balanced',
+                    random_state=Config.RANDOM_STATE,
+                    max_iter=1000
+                )
+                
+                stacking_ensemble = StackingClassifier(
+                    estimators=good_models,
+                    final_estimator=meta_model,
+                    cv=3,
+                    n_jobs=Config.N_JOBS,
+                    passthrough=False
+                )
+                
+                stacking_ensemble.fit(X_train, y_train)
+                self.models['stacking_ensemble'] = stacking_ensemble
+                
+                print("스태킹 앙상블 생성 완료")
+                return stacking_ensemble
+                
+            except Exception as e:
+                print(f"스태킹 앙상블 생성 실패: {e}")
+                return None
+        else:
+            print("스태킹을 위한 충분한 모델이 없음")
+            return None
+    
+    @timer
+    def create_voting_ensemble(self, X_train, y_train):
+        """보팅 앙상블 생성"""
+        print("=== 보팅 앙상블 생성 시작 ===")
+        
+        # 성능 기준 모델 선택
         good_models = []
         for name, model in self.models.items():
             if name in self.cv_scores and self.cv_scores[name]['mean'] >= 0.72:
                 good_models.append((name, model))
         
         if len(good_models) < 2:
-            # 기준 완화하여 상위 3개 모델 선택
+            # 기준 완화하여 상위 4개 모델 선택
             sorted_models = sorted(self.cv_scores.items(), key=lambda x: x[1]['mean'], reverse=True)
-            good_models = [(name, self.models[name]) for name, _ in sorted_models[:3] if name in self.models]
+            good_models = [(name, self.models[name]) for name, _ in sorted_models[:4] if name in self.models]
         
         if len(good_models) >= 2:
-            print(f"앙상블에 사용할 모델: {[name for name, _ in good_models]}")
+            print(f"보팅에 사용할 모델: {[name for name, _ in good_models]}")
             
             try:
                 # Soft voting 앙상블
@@ -351,16 +523,47 @@ class ModelTraining:
                 )
                 voting_ensemble.fit(X_train, y_train)
                 
-                self.models['ensemble'] = voting_ensemble
-                print("Soft voting 앙상블 생성 완료")
+                self.models['voting_ensemble'] = voting_ensemble
+                print("소프트 보팅 앙상블 생성 완료")
                 
                 return voting_ensemble
             except Exception as e:
-                print(f"앙상블 생성 실패: {e}")
+                print(f"보팅 앙상블 생성 실패: {e}")
                 return None
         else:
-            print("앙상블을 위한 충분한 모델이 없음")
+            print("보팅을 위한 충분한 모델이 없음")
             return None
+    
+    @timer
+    def calibrate_models(self, X_train, y_train):
+        """모델 확률 보정"""
+        print("=== 모델 확률 보정 시작 ===")
+        
+        calibration_methods = ['isotonic', 'sigmoid']
+        
+        for model_name, model in self.models.items():
+            if hasattr(model, 'predict_proba') and model_name not in ['voting_ensemble', 'stacking_ensemble']:
+                try:
+                    # 두 가지 보정 방법 모두 시도
+                    for method in calibration_methods:
+                        calibrated_model = CalibratedClassifierCV(
+                            base_estimator=model,
+                            method=method,
+                            cv=3
+                        )
+                        
+                        calibrated_model.fit(X_train, y_train)
+                        calibrated_name = f'{model_name}_calibrated_{method}'
+                        self.calibrated_models[calibrated_name] = calibrated_model
+                        
+                    print(f"{model_name} 확률 보정 완료")
+                    
+                except Exception as e:
+                    print(f"{model_name} 확률 보정 실패: {e}")
+                    continue
+        
+        print(f"보정된 모델 수: {len(self.calibrated_models)}")
+        return self.calibrated_models
     
     @timer
     def feature_importance_analysis(self, model=None, feature_names=None):
@@ -393,8 +596,8 @@ class ModelTraining:
                 'importance': importances
             }).sort_values('importance', ascending=False)
             
-            print("상위 15개 중요 피처:")
-            print(feature_importance_df.head(15))
+            print("상위 20개 중요 피처:")
+            print(feature_importance_df.head(20))
             
             from utils import save_results
             save_results(feature_importance_df, Config.FEATURE_IMPORTANCE_FILE)
@@ -410,14 +613,14 @@ class ModelTraining:
         print("=== 전체 모델 훈련 시작 ===")
         
         if model_list is None:
-            model_list = ['lightgbm', 'xgboost', 'catboost', 'random_forest']
+            model_list = ['lightgbm', 'xgboost', 'catboost', 'random_forest', 'linear', 'svm', 'neural_network', 'additional']
         
         # 기본 모델들 훈련
         if 'lightgbm' in model_list:
             if use_optimization:
                 print("LightGBM 하이퍼파라미터 튜닝 중...")
                 best_params, _ = self.hyperparameter_optimization_optuna(
-                    X_train, y_train, 'lightgbm', n_trials=300
+                    X_train, y_train, 'lightgbm', n_trials=500
                 )
                 self.train_lightgbm(X_train, y_train, X_val, y_val, best_params)
             else:
@@ -427,7 +630,7 @@ class ModelTraining:
             if use_optimization:
                 print("XGBoost 하이퍼파라미터 튜닝 중...")
                 best_params, _ = self.hyperparameter_optimization_optuna(
-                    X_train, y_train, 'xgboost', n_trials=300
+                    X_train, y_train, 'xgboost', n_trials=500
                 )
                 self.train_xgboost(X_train, y_train, X_val, y_val, best_params)
             else:
@@ -443,31 +646,57 @@ class ModelTraining:
         if 'random_forest' in model_list:
             self.train_random_forest(X_train, y_train)
         
+        if 'linear' in model_list:
+            self.train_linear_models(X_train, y_train)
+        
+        if 'svm' in model_list:
+            # SVM은 데이터 크기가 클 때 건너뜀
+            if X_train.shape[0] <= 20000:
+                self.train_svm(X_train, y_train)
+            else:
+                print("SVM 건너뜀: 데이터 크기가 너무 큼")
+        
+        if 'neural_network' in model_list:
+            self.train_neural_network(X_train, y_train)
+        
+        if 'additional' in model_list:
+            self.train_additional_models(X_train, y_train)
+        
         # 교차 검증
         self.cross_validation(X_train, y_train)
         
-        # 간단한 앙상블 생성
-        ensemble = self.create_simple_ensemble(X_train, y_train)
-        if ensemble:
-            # 앙상블 성능 검증
-            ensemble_cv = cross_val_score(
-                ensemble, X_train, y_train, 
-                cv=3, scoring=self.scorer, n_jobs=1
-            )
-            
-            self.cv_scores['ensemble'] = {
-                'scores': ensemble_cv,
-                'mean': ensemble_cv.mean(),
-                'std': ensemble_cv.std()
-            }
-            
-            print(f"앙상블 CV 점수: {ensemble_cv.mean():.4f} (+/- {ensemble_cv.std() * 2:.4f})")
-            
-            # 앙상블이 더 좋으면 업데이트
-            if ensemble_cv.mean() > self.best_score:
-                self.best_model = ensemble
-                self.best_score = ensemble_cv.mean()
-                print("앙상블이 최고 성능 모델로 선택됨")
+        # 확률 보정
+        self.calibrate_models(X_train, y_train)
+        
+        # 앙상블 생성
+        voting_ensemble = self.create_voting_ensemble(X_train, y_train)
+        stacking_ensemble = self.create_stacking_ensemble(X_train, y_train)
+        
+        # 앙상블 성능 검증
+        for ensemble_name, ensemble in [('voting_ensemble', voting_ensemble), ('stacking_ensemble', stacking_ensemble)]:
+            if ensemble is not None:
+                try:
+                    ensemble_cv = cross_val_score(
+                        ensemble, X_train, y_train, 
+                        cv=3, scoring=self.scorer, n_jobs=1
+                    )
+                    
+                    self.cv_scores[ensemble_name] = {
+                        'scores': ensemble_cv,
+                        'mean': ensemble_cv.mean(),
+                        'std': ensemble_cv.std()
+                    }
+                    
+                    print(f"{ensemble_name} CV 점수: {ensemble_cv.mean():.4f} (+/- {ensemble_cv.std() * 2:.4f})")
+                    
+                    # 앙상블이 더 좋으면 업데이트
+                    if ensemble_cv.mean() > self.best_score:
+                        self.best_model = ensemble
+                        self.best_score = ensemble_cv.mean()
+                        print(f"{ensemble_name}이 최고 성능 모델로 선택됨")
+                        
+                except Exception as e:
+                    print(f"{ensemble_name} 검증 실패: {e}")
         
         # 최고 모델 저장
         if self.best_model is not None:
@@ -475,9 +704,16 @@ class ModelTraining:
             print(f"최고 모델 저장: {type(self.best_model).__name__}")
         
         # CV 결과 저장
-        cv_results_df = pd.DataFrame(self.cv_scores).T
-        cv_results_df.reset_index(inplace=True)
-        cv_results_df.rename(columns={'index': 'model'}, inplace=True)
+        cv_results_data = []
+        for model_name, scores in self.cv_scores.items():
+            cv_results_data.append({
+                'model': model_name,
+                'mean': scores['mean'],
+                'std': scores['std'],
+                'scores': scores['scores'].tolist() if hasattr(scores['scores'], 'tolist') else scores['scores']
+            })
+        
+        cv_results_df = pd.DataFrame(cv_results_data)
         
         from utils import save_results
         save_results(cv_results_df, Config.CV_RESULTS_FILE)
