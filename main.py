@@ -13,15 +13,9 @@ from utils import setup_logging, memory_usage_check
 
 def main():
     """메인 실행 함수"""
-    print("=" * 60)
-    print("   스마트 장비 이상신호 감지 시스템")
-    print("=" * 60)
-    
     logger = setup_logging()
     logger.info("시스템 시작")
-    
     Config.create_directories()
-    
     initial_memory = memory_usage_check()
     
     try:
