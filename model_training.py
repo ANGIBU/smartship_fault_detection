@@ -115,14 +115,14 @@ class ModelTraining:
         try:
             from catboost import CatBoostClassifier
             
+            # 안전한 파라미터 설정
             params = {
-                'iterations': 1000,
+                'iterations': 600,
                 'learning_rate': 0.08,
                 'depth': 8,
                 'l2_leaf_reg': 3,
                 'bootstrap_type': 'Bayesian',
                 'bagging_temperature': 1,
-                'subsample': 0.8,
                 'sampling_frequency': 'PerTree',
                 'colsample_bylevel': 0.8,
                 'random_seed': Config.RANDOM_STATE,
@@ -151,6 +151,10 @@ class ModelTraining:
         
         except ImportError:
             print("CatBoost 라이브러리가 설치되지 않음. 건너뛰기")
+            return None
+        except Exception as e:
+            print(f"CatBoost 훈련 중 오류 발생: {e}")
+            self.logger.error(f"CatBoost 훈련 실패: {e}")
             return None
     
     @timer
@@ -430,7 +434,11 @@ class ModelTraining:
                 self.train_xgboost(X_train, y_train, X_val, y_val)
         
         if 'catboost' in model_list:
-            self.train_catboost(X_train, y_train, X_val, y_val)
+            try:
+                self.train_catboost(X_train, y_train, X_val, y_val)
+            except Exception as e:
+                print(f"CatBoost 훈련 건너뜀: {e}")
+                self.logger.warning(f"CatBoost 훈련 실패: {e}")
         
         if 'random_forest' in model_list:
             self.train_random_forest(X_train, y_train)

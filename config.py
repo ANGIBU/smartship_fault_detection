@@ -104,7 +104,7 @@ class Config:
         'class_weight': 'balanced'
     }
     
-    # CatBoost 파라미터
+    # CatBoost 파라미터 - subsample 제거
     CATBOOST_PARAMS = {
         'iterations': 600,
         'learning_rate': 0.1,
@@ -112,7 +112,6 @@ class Config:
         'l2_leaf_reg': 3,
         'bootstrap_type': 'Bayesian',
         'bagging_temperature': 1,
-        'subsample': 0.8,
         'sampling_frequency': 'PerTree',
         'colsample_bylevel': 0.8,
         'random_seed': RANDOM_STATE,
