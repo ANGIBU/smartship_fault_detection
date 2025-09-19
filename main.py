@@ -3,6 +3,7 @@
 import pandas as pd
 import numpy as np
 import warnings
+import sys
 warnings.filterwarnings('ignore')
 
 from config import Config
@@ -28,26 +29,26 @@ def main():
         X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
             use_feature_selection=True,
             use_pca=False,
-            scaling_method='robust'
+            scaling_method='quantile'
         )
         
         print(f"훈련 데이터 형태: {X_train.shape}")
         print(f"테스트 데이터 형태: {X_test.shape}")
-        print(f"타겟 분포: {pd.Series(y_train).value_counts().sort_index().values}")
+        print(f"타겟 분포: {pd.Series(y_train).value_counts().sort_index().head(10).values}")
         
         # 데이터 크기에 따른 설정 조정
         adjustments = Config.adjust_for_data_size(len(X_train), X_train.shape[1])
-        print(f"데이터 크기 기반 조정: {adjustments}")
+        if adjustments:
+            print(f"데이터 크기 기반 조정: {adjustments}")
         
         # 2. 검증 전략 정교화
         print("\n" + "=" * 50)
         print("2단계: 검증 전략 설정")
         print("=" * 50)
         
-        # 다중 검증 전략 적용
         from sklearn.model_selection import train_test_split, StratifiedShuffleSplit
         
-        # 첫 번째 분할: 홀드아웃 검증용
+        # 홀드아웃 검증용 분할
         sss = StratifiedShuffleSplit(
             n_splits=1, 
             test_size=Config.VALIDATION_SIZE, 
@@ -65,7 +66,7 @@ def main():
         
         # 검증 세트 분포 확인
         val_distribution = pd.Series(y_val).value_counts().sort_index()
-        print(f"검증 세트 클래스 분포:")
+        print(f"검증 세트 클래스 분포 (상위 10개):")
         print(val_distribution.head(10))
         
         # 3. 모델 훈련
@@ -87,7 +88,8 @@ def main():
         )
         
         print(f"훈련된 모델 개수: {len(models)}")
-        print(f"최고 성능 모델: {type(best_model).__name__}")
+        if best_model is not None:
+            print(f"최고 성능 모델: {type(best_model).__name__}")
         
         # 4. 다중 검증 수행
         print("\n" + "=" * 50)
@@ -95,15 +97,19 @@ def main():
         print("=" * 50)
         
         # 홀드아웃 검증
-        val_predictor = Prediction(best_model)
-        val_predictions = val_predictor.predict(X_val)
-        val_metrics = val_predictor.validate_predictions(y_val)
-        
-        if val_metrics:
-            print(f"홀드아웃 검증 Macro F1 Score: {val_metrics['macro_f1']:.4f}")
-            holdout_score = val_metrics['macro_f1']
+        if best_model is not None:
+            val_predictor = Prediction(best_model)
+            val_predictions = val_predictor.predict(X_val)
+            val_metrics = val_predictor.validate_predictions(y_val)
+            
+            if val_metrics:
+                print(f"홀드아웃 검증 Macro F1 Score: {val_metrics['macro_f1']:.4f}")
+                holdout_score = val_metrics['macro_f1']
+            else:
+                holdout_score = 0.0
         else:
             holdout_score = 0.0
+            val_metrics = None
         
         # 교차 검증 결과와 홀드아웃 결과 비교
         if trainer.cv_scores:
@@ -113,18 +119,20 @@ def main():
             
             print(f"교차 검증 점수: {cv_score:.4f}")
             print(f"홀드아웃 검증 점수: {holdout_score:.4f}")
-            print(f"검증 차이: {abs(cv_score - holdout_score):.4f}")
             
-            # 과적합 경고
-            if abs(cv_score - holdout_score) > 0.02:
-                print("경고: 교차 검증과 홀드아웃 검증 차이가 큼. 과적합 의심")
-                # 보수적 모델 선택
-                conservative_models = ['random_forest', 'ridge', 'logistic_regression']
-                for model_name in conservative_models:
-                    if model_name in models:
-                        best_model = models[model_name]
-                        print(f"보수적 모델로 변경: {model_name}")
-                        break
+            if holdout_score > 0:
+                print(f"검증 차이: {abs(cv_score - holdout_score):.4f}")
+                
+                # 과적합 경고
+                if abs(cv_score - holdout_score) > 0.03:
+                    print("경고: 교차 검증과 홀드아웃 검증 차이가 큼. 과적합 의심")
+                    # 보수적 모델 선택
+                    conservative_models = ['random_forest', 'extra_trees', 'gradient_boosting']
+                    for model_name in conservative_models:
+                        if model_name in models:
+                            best_model = models[model_name]
+                            print(f"보수적 모델로 변경: {model_name}")
+                            break
         
         # 5. 앙상블 검증 및 선택
         print("\n" + "=" * 50)
@@ -144,36 +152,70 @@ def main():
         
         print(f"앙상블 후보 모델: {len(good_models)}개")
         
+        # 보정된 모델들도 추가
+        if hasattr(trainer, 'calibrated_models') and trainer.calibrated_models:
+            for calibrated_name, calibrated_model in trainer.calibrated_models.items():
+                if calibrated_name in trainer.cv_scores:
+                    score = trainer.cv_scores[calibrated_name]['mean']
+                    if score >= Config.MIN_CV_SCORE:
+                        good_models[calibrated_name] = calibrated_model
+                        print(f"{calibrated_name}: {score:.4f} (보정 모델 포함)")
+        
         # 6. 테스트 예측
         print("\n" + "=" * 50)
         print("6단계: 테스트 예측")
         print("=" * 50)
         
-        predictor = Prediction(best_model)
-        
-        # 앙상블 예측 수행
-        if len(good_models) >= 2:
-            print(f"앙상블 사용 모델: {list(good_models.keys())}")
-            ensemble_predictions = predictor.predict_with_ensemble(good_models, X_test)
-        else:
-            # 단일 모델 예측
-            test_predictions = predictor.predict(X_test)
-        
-        # 예측 분포 분석
-        distribution_info = predictor.analyze_prediction_distribution()
+        if best_model is not None:
+            predictor = Prediction(best_model)
+            
+            # 앙상블 예측 수행
+            if len(good_models) >= 2:
+                print(f"앙상블 사용 모델: {list(good_models.keys())}")
+                
+                # 성능 기반 가중치 계산
+                weights = {}
+                for name in good_models.keys():
+                    if name in trainer.cv_scores:
+                        weights[name] = trainer.cv_scores[name]['mean']
+                
+                # 정규화
+                total_weight = sum(weights.values())
+                if total_weight > 0:
+                    weights = {k: v/total_weight for k, v in weights.items()}
+                
+                ensemble_predictions = predictor.predict_with_ensemble(
+                    good_models, X_test, 
+                    method='weighted_average',
+                    weights=weights
+                )
+            else:
+                # 단일 모델 예측
+                test_predictions = predictor.predict(X_test)
+            
+            # 예측 분포 분석
+            distribution_info = predictor.analyze_prediction_distribution()
+            
+            # 신뢰도 필터링 적용
+            if predictor.prediction_probabilities is not None:
+                predictor.confidence_filtering(confidence_threshold=0.7)
         
         # 7. 제출 파일 생성
         print("\n" + "=" * 50)
         print("7단계: 제출 파일 생성")
         print("=" * 50)
         
-        submission_df = predictor.create_submission_file(
-            test_ids, 
-            apply_balancing=True
-        )
-        
-        print(f"제출 파일 생성 완료: {Config.RESULT_FILE}")
-        print(f"제출 파일 형태: {submission_df.shape}")
+        if best_model is not None:
+            submission_df = predictor.create_submission_file(
+                test_ids, 
+                apply_balancing=True
+            )
+            
+            print(f"제출 파일 생성 완료: {Config.RESULT_FILE}")
+            print(f"제출 파일 형태: {submission_df.shape}")
+        else:
+            print("경고: 유효한 모델이 없어 제출 파일을 생성할 수 없습니다.")
+            submission_df = None
         
         # 8. 성능 분석 및 리포트
         print("\n" + "=" * 50)
@@ -181,10 +223,11 @@ def main():
         print("=" * 50)
         
         # 피처 중요도 분석
-        feature_importance = trainer.feature_importance_analysis(
-            best_model, 
-            X_train.columns.tolist()
-        )
+        if best_model is not None:
+            feature_importance = trainer.feature_importance_analysis(
+                best_model, 
+                X_train.columns.tolist() if hasattr(X_train, 'columns') else None
+            )
         
         # CV 결과 출력
         if trainer.cv_scores:
@@ -192,21 +235,26 @@ def main():
             sorted_scores = sorted(trainer.cv_scores.items(), 
                                  key=lambda x: x[1]['mean'], reverse=True)
             for model_name, scores in sorted_scores:
-                print(f"{model_name}: {scores['mean']:.4f} (+/- {scores['std']*2:.4f})")
+                mean_score = scores['mean']
+                std_score = scores['std']
+                print(f"{model_name:20s}: {mean_score:.4f} (+/- {std_score*2:.4f})")
         
         # 성능 예측 및 권장사항
         print("\n=== 성능 예측 분석 ===")
-        if holdout_score > 0:
-            expected_performance = min(holdout_score, cv_score) * 0.98  # 보수적 추정
+        if holdout_score > 0 and trainer.cv_scores:
+            best_cv_score = max(score['mean'] for score in trainer.cv_scores.values())
+            expected_performance = min(holdout_score, best_cv_score) * 0.98  # 보수적 추정
             print(f"예상 실제 성능: {expected_performance:.4f}")
-            print(f"목표 성능까지: {0.80 - expected_performance:.4f}점 필요")
+            print(f"목표 성능 (0.80)까지: {0.80 - expected_performance:.4f}점 필요")
             
             if expected_performance < 0.75:
                 print("권장사항: 피처 엔지니어링 재검토 및 모델 다양성 확대")
             elif expected_performance < 0.78:
                 print("권장사항: 하이퍼파라미터 튜닝 및 앙상블 가중치 조정")
-            else:
+            elif expected_performance < 0.82:
                 print("권장사항: 확률 보정 및 세밀한 앙상블 튜닝")
+            else:
+                print("권장사항: 현재 접근 방법 유지 및 세부 조정")
         
         # 최종 메모리 사용량 및 요약
         final_memory = memory_usage_check()
@@ -224,21 +272,30 @@ def main():
         if val_metrics:
             print(f"홀드아웃 검증 점수: {val_metrics['macro_f1']:.4f}")
         
+        if trainer.cv_scores:
+            best_cv_mean = max(score['mean'] for score in trainer.cv_scores.values())
+            print(f"최고 교차 검증 점수: {best_cv_mean:.4f}")
+        
         logger.info("시스템 정상 완료")
         
-        return {
+        # 반환값 구성
+        result_dict = {
             'models': models,
             'best_model': best_model,
             'val_metrics': val_metrics,
             'cv_scores': trainer.cv_scores,
-            'distribution_info': distribution_info,
+            'distribution_info': distribution_info if 'distribution_info' in locals() else None,
             'submission_df': submission_df,
             'expected_performance': expected_performance if 'expected_performance' in locals() else None
         }
         
+        return result_dict
+        
     except Exception as e:
         logger.error(f"시스템 실행 중 오류 발생: {e}")
         print(f"오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 def run_fast_mode():
@@ -254,14 +311,14 @@ def run_fast_mode():
         processor = DataProcessor()
         X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
             use_feature_selection=True,
-            scaling_method='standard'
+            scaling_method='robust'
         )
         
         # 검증 데이터 분할
         from sklearn.model_selection import train_test_split
         X_train_split, X_val, y_train_split, y_val = train_test_split(
             X_train, y_train, 
-            test_size=0.1,  # 빠른 모드에서는 검증 세트 축소
+            test_size=0.15,
             random_state=Config.RANDOM_STATE,
             stratify=y_train
         )
@@ -282,14 +339,18 @@ def run_fast_mode():
         )
         
         print(f"훈련된 모델 개수: {len(models)}")
-        print(f"최고 성능 모델: {type(best_model).__name__}")
+        if best_model is not None:
+            print(f"최고 성능 모델: {type(best_model).__name__}")
         
         # 테스트 예측
-        predictor = Prediction(best_model)
-        test_predictions = predictor.predict(X_test)
-        
-        # 제출 파일 생성
-        submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
+        if best_model is not None:
+            predictor = Prediction(best_model)
+            test_predictions = predictor.predict(X_test)
+            
+            # 제출 파일 생성
+            submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
+        else:
+            submission_df = None
         
         print(f"빠른 실행 완료: {Config.RESULT_FILE}")
         
@@ -297,6 +358,8 @@ def run_fast_mode():
         
     except Exception as e:
         print(f"빠른 실행 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 def run_prediction_only():
@@ -330,6 +393,8 @@ def run_prediction_only():
         
     except Exception as e:
         print(f"예측 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 def run_performance_mode():
@@ -346,7 +411,7 @@ def run_performance_mode():
         X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
             use_feature_selection=True,
             use_pca=False,
-            scaling_method='quantile'  # 분포 정규화
+            scaling_method='quantile'
         )
         
         # 성능 중심 검증 데이터 분할
@@ -379,17 +444,31 @@ def run_performance_mode():
         if trainer.cv_scores:
             sorted_models = sorted(trainer.cv_scores.items(), 
                                  key=lambda x: x[1]['mean'], reverse=True)
-            for name, score_info in sorted_models[:3]:  # 상위 3개만
+            for name, score_info in sorted_models[:5]:  # 상위 5개
                 if name in models:
                     top_models[name] = models[name]
         
-        if len(top_models) >= 2:
-            ensemble_predictions = predictor.predict_with_ensemble(top_models, X_test)
-        else:
+        if len(top_models) >= 2 and best_model is not None:
+            # 성능 기반 가중치
+            weights = {}
+            for name in top_models.keys():
+                if name in trainer.cv_scores:
+                    weights[name] = trainer.cv_scores[name]['mean']
+            
+            ensemble_predictions = predictor.predict_with_ensemble(
+                top_models, X_test,
+                method='weighted_average',
+                weights=weights
+            )
+        elif best_model is not None:
+            predictor.model = best_model
             test_predictions = predictor.predict(X_test)
         
         # 제출 파일 생성
-        submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
+        if best_model is not None:
+            submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
+        else:
+            submission_df = None
         
         print("성능 중심 실행 완료")
         print(f"제출 파일: {Config.RESULT_FILE}")
@@ -398,6 +477,8 @@ def run_performance_mode():
         
     except Exception as e:
         print(f"성능 모드 실행 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 def run_analysis_mode():
@@ -421,35 +502,47 @@ def run_analysis_mode():
         print(f"피처 증가율: {(X_train.shape[1] / len(Config.FEATURE_COLUMNS) - 1) * 100:.1f}%")
         
         # 피처 상관관계 분석
-        correlation_matrix = X_train.corr()
-        high_corr = (correlation_matrix.abs() > 0.9).sum().sum() - X_train.shape[1]
-        print(f"고상관 피처 쌍 수 (>0.9): {high_corr // 2}")
+        if hasattr(X_train, 'corr'):
+            correlation_matrix = X_train.corr()
+            high_corr = (correlation_matrix.abs() > 0.9).sum().sum() - X_train.shape[1]
+            print(f"고상관 피처 쌍 수 (>0.9): {high_corr // 2}")
         
         # 클래스별 분포 분석
         class_stats = {}
-        for class_id in range(Config.N_CLASSES):
+        unique_classes = np.unique(y_train)
+        for class_id in unique_classes:
             class_mask = y_train == class_id
             class_data = X_train[class_mask]
             class_stats[class_id] = {
                 'count': len(class_data),
-                'mean': class_data.mean().mean(),
-                'std': class_data.std().mean()
+                'mean': class_data.mean().mean() if hasattr(class_data, 'mean') else np.mean(class_data.values),
+                'std': class_data.std().mean() if hasattr(class_data, 'std') else np.std(class_data.values)
             }
         
-        print(f"\n=== 클래스별 통계 ===")
-        for class_id, stats in class_stats.items():
-            print(f"클래스 {class_id}: {stats['count']}개, "
+        print(f"\n=== 클래스별 통계 (상위 10개) ===")
+        for i, (class_id, stats) in enumerate(class_stats.items()):
+            if i >= 10:
+                break
+            print(f"클래스 {class_id:2d}: {stats['count']:4d}개, "
                   f"평균: {stats['mean']:.4f}, 표준편차: {stats['std']:.4f}")
+        
+        # 센서 그룹별 분석
+        if hasattr(processor, 'group_stats') and processor.group_stats:
+            print(f"\n=== 센서 그룹별 분석 ===")
+            for group_name, group_info in processor.group_stats.items():
+                sensors = group_info['sensors']
+                mean_corr = group_info['mean_corr']
+                print(f"{group_name}: {len(sensors)}개 센서, 평균 상관관계: {mean_corr:.3f}")
         
         return X_train, X_test, y_train, class_stats
         
     except Exception as e:
         print(f"분석 모드 실행 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 if __name__ == "__main__":
-    import sys
-    
     if len(sys.argv) > 1:
         mode = sys.argv[1].lower()
         

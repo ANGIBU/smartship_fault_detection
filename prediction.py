@@ -5,6 +5,7 @@ import numpy as np
 from sklearn.metrics import f1_score
 from sklearn.calibration import CalibratedClassifierCV
 from scipy import stats
+from scipy.special import softmax
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -18,6 +19,7 @@ class Prediction:
         self.prediction_probabilities = None
         self.ensemble_models = {}
         self.prediction_history = []
+        self.class_distributions = None
         
     def load_trained_model(self, model_path=None):
         """훈련된 모델 로드"""
@@ -51,8 +53,7 @@ class Prediction:
         elif hasattr(self.model, 'decision_function'):
             # SVM 등의 경우
             decision_scores = self.model.decision_function(X_test)
-            # 소프트맥스 변환으로 확률 근사
-            self.prediction_probabilities = self._softmax(decision_scores)
+            self.prediction_probabilities = self._convert_to_probabilities(decision_scores)
             print(f"결정 함수 기반 확률 형태: {self.prediction_probabilities.shape}")
         
         # 예측 클래스
@@ -64,14 +65,21 @@ class Prediction:
         
         return self.predictions
     
-    def _softmax(self, scores):
-        """소프트맥스 변환"""
-        exp_scores = np.exp(scores - np.max(scores, axis=1, keepdims=True))
-        return exp_scores / np.sum(exp_scores, axis=1, keepdims=True)
+    def _convert_to_probabilities(self, scores):
+        """점수를 확률로 변환"""
+        if scores.ndim == 1:
+            # 이진 분류의 경우 다중 분류로 변환
+            probs = np.zeros((len(scores), Config.N_CLASSES))
+            # 임시로 균등 분포 할당
+            probs.fill(1.0 / Config.N_CLASSES)
+            return probs
+        else:
+            # 다중 분류의 경우 소프트맥스 적용
+            return softmax(scores, axis=1)
     
     @timer
     def predict_with_ensemble(self, models_dict, X_test, method='weighted_average', weights=None):
-        """앙상블 예측 - 다양한 방법 지원"""
+        """앙상블 예측"""
         print("=== 앙상블 예측 수행 중 ===")
         print(f"사용 모델 수: {len(models_dict)}")
         print(f"앙상블 방법: {method}")
@@ -93,7 +101,7 @@ class Prediction:
                     prob = model.predict_proba(X_test)
                 elif hasattr(model, 'decision_function'):
                     decision_scores = model.decision_function(X_test)
-                    prob = self._softmax(decision_scores)
+                    prob = self._convert_to_probabilities(decision_scores)
                 else:
                     # 원핫 인코딩으로 확률 근사
                     prob = np.zeros((len(pred), Config.N_CLASSES))
@@ -126,6 +134,10 @@ class Prediction:
             ensemble_probabilities = self._geometric_mean_ensemble(
                 model_probabilities, weights
             )
+        elif method == 'bayesian_average':
+            ensemble_probabilities = self._bayesian_average_ensemble(
+                model_probabilities, weights
+            )
         elif method == 'majority_vote':
             ensemble_predictions = self._majority_vote_ensemble(
                 model_predictions, weights
@@ -133,6 +145,10 @@ class Prediction:
             self.predictions = ensemble_predictions
             validate_predictions(self.predictions, Config.N_CLASSES)
             return self.predictions
+        elif method == 'dynamic_weighting':
+            ensemble_probabilities = self._dynamic_weighted_ensemble(
+                model_probabilities, X_test
+            )
         else:
             # 기본값: 가중 평균
             ensemble_probabilities = self._weighted_average_ensemble(
@@ -186,7 +202,7 @@ class Prediction:
         
         for name, prob in model_probabilities.items():
             # 로그 확률 계산 (0 방지를 위해 작은 값 추가)
-            log_prob = np.log(prob + 1e-10)
+            log_prob = np.log(prob + 1e-15)
             weight = weights.get(name, 1.0)
             log_probs.append(log_prob * weight)
         
@@ -198,6 +214,48 @@ class Prediction:
         
         # 정규화
         return ensemble_prob / ensemble_prob.sum(axis=1, keepdims=True)
+    
+    def _bayesian_average_ensemble(self, model_probabilities, weights):
+        """베이지안 평균 앙상블"""
+        # 각 모델의 신뢰도를 가중치로 사용
+        confidence_weights = {}
+        
+        for name, prob in model_probabilities.items():
+            # 각 예측의 최대 확률을 신뢰도로 사용
+            confidence = np.mean(np.max(prob, axis=1))
+            confidence_weights[name] = confidence * weights.get(name, 1.0)
+        
+        return self._weighted_average_ensemble(model_probabilities, confidence_weights)
+    
+    def _dynamic_weighted_ensemble(self, model_probabilities, X_test):
+        """동적 가중치 앙상블"""
+        ensemble_probs = []
+        
+        for i in range(len(X_test)):
+            sample_weights = {}
+            
+            # 각 모델의 예측 확률을 기반으로 가중치 계산
+            for name, prob in model_probabilities.items():
+                sample_prob = prob[i]
+                # 최대 확률과 엔트로피를 기반으로 가중치 계산
+                max_prob = np.max(sample_prob)
+                entropy = -np.sum(sample_prob * np.log(sample_prob + 1e-15))
+                
+                # 높은 신뢰도와 낮은 엔트로피에 더 높은 가중치
+                weight = max_prob * (1.0 / (entropy + 1e-8))
+                sample_weights[name] = weight
+            
+            # 가중 평균 계산
+            weighted_prob = np.zeros(Config.N_CLASSES)
+            total_weight = sum(sample_weights.values())
+            
+            for name, prob in model_probabilities.items():
+                weight = sample_weights[name] / total_weight
+                weighted_prob += prob[i] * weight
+            
+            ensemble_probs.append(weighted_prob)
+        
+        return np.array(ensemble_probs)
     
     def _majority_vote_ensemble(self, model_predictions, weights):
         """다수결 투표 앙상블"""
@@ -230,7 +288,7 @@ class Prediction:
             calibrated_model = CalibratedClassifierCV(
                 base_estimator=self.model,
                 method=method,
-                cv='prefit'  # 이미 훈련된 모델 사용
+                cv='prefit'
             )
             
             calibrated_model.fit(X_val, y_val)
@@ -262,24 +320,31 @@ class Prediction:
         
         # 저신뢰도 예측에 대한 처리
         if low_conf_count > 0:
-            # 클래스 빈도 기반으로 저신뢰도 예측 보정
             filtered_predictions = self.predictions.copy()
             
-            # 전체 예측 분포 계산
-            unique, counts = np.unique(self.predictions, return_counts=True)
-            class_probs = counts / len(self.predictions)
-            
-            # 저신뢰도 예측을 확률 분포에 따라 재할당
+            # 저신뢰도 예측 인덱스
             low_conf_indices = np.where(~high_confidence_mask)[0]
-            np.random.seed(Config.RANDOM_STATE)
             
             for idx in low_conf_indices:
-                # 두 번째로 높은 확률 클래스 고려
+                # 상위 2개 확률 클래스 고려
                 prob_order = np.argsort(self.prediction_probabilities[idx])[::-1]
                 top2_classes = prob_order[:2]
                 
-                # 더 높은 확률의 클래스 선택
-                filtered_predictions[idx] = top2_classes[0]
+                # 두 번째 클래스와의 차이가 작으면 더 안전한 선택
+                prob_diff = (self.prediction_probabilities[idx, top2_classes[0]] - 
+                           self.prediction_probabilities[idx, top2_classes[1]])
+                
+                if prob_diff < 0.1:
+                    # 차이가 작으면 클래스 빈도를 고려하여 선택
+                    if self.class_distributions is not None:
+                        class1_freq = self.class_distributions.get(top2_classes[0], 1)
+                        class2_freq = self.class_distributions.get(top2_classes[1], 1)
+                        
+                        # 더 빈번한 클래스 선택
+                        if class2_freq > class1_freq:
+                            filtered_predictions[idx] = top2_classes[1]
+                else:
+                    filtered_predictions[idx] = top2_classes[0]
             
             self.predictions = filtered_predictions
             print("저신뢰도 예측 보정 완료")
@@ -298,17 +363,28 @@ class Prediction:
         current_counts = np.bincount(self.predictions, minlength=Config.N_CLASSES)
         total_samples = len(self.predictions)
         
-        # 목표 분포 설정
+        # 목표 분포 설정 (더 정교한 방식)
         if target_distribution is None:
-            target_per_class = total_samples // Config.N_CLASSES
-            target_distribution = np.full(Config.N_CLASSES, target_per_class)
+            # 이상적인 균등 분포 대신 약간의 변동성 허용
+            base_count = total_samples // Config.N_CLASSES
             remainder = total_samples % Config.N_CLASSES
-            target_distribution[:remainder] += 1
+            
+            target_distribution = np.full(Config.N_CLASSES, base_count)
+            
+            # 나머지를 랜덤하게 분배하되, 클래스 0-10에 우선순위
+            indices = np.random.RandomState(Config.RANDOM_STATE).choice(
+                min(remainder + 5, Config.N_CLASSES), remainder, replace=False
+            )
+            target_distribution[indices] += 1
         
-        print(f"목표 분포: 클래스당 약 {target_distribution[0]}개")
+        print(f"목표 분포: 평균 {np.mean(target_distribution):.0f}개 (범위: {np.min(target_distribution)}-{np.max(target_distribution)})")
         
         if method == 'probability_based' and self.prediction_probabilities is not None:
             balanced_predictions = self._probability_based_balancing(
+                current_counts, target_distribution
+            )
+        elif method == 'confidence_based' and self.prediction_probabilities is not None:
+            balanced_predictions = self._confidence_based_balancing(
                 current_counts, target_distribution
             )
         else:
@@ -324,7 +400,8 @@ class Prediction:
         for i in range(Config.N_CLASSES):
             old_count = current_counts[i]
             new_count = new_counts[i]
-            print(f"클래스 {i}: {old_count} → {new_count}")
+            target_count = target_distribution[i]
+            print(f"클래스 {i}: {old_count} → {new_count} (목표: {target_count})")
         
         return self.predictions
     
@@ -332,6 +409,7 @@ class Prediction:
         """확률 기반 균형 조정"""
         balanced_predictions = self.predictions.copy()
         
+        # 각 클래스별로 조정
         for class_id in range(Config.N_CLASSES):
             current_count = current_counts[class_id]
             target_count = target_distribution[class_id]
@@ -344,11 +422,15 @@ class Prediction:
                 remove_count = current_count - target_count
                 low_prob_indices = class_indices[np.argsort(class_probabilities)[:remove_count]]
                 
-                # 두 번째로 높은 확률을 가진 클래스로 재할당
+                # 다음으로 높은 확률을 가진 클래스로 재할당
                 for idx in low_prob_indices:
-                    prob_sorted = np.argsort(self.prediction_probabilities[idx])[::-1]
-                    second_best = prob_sorted[1]
-                    balanced_predictions[idx] = second_best
+                    prob_order = np.argsort(self.prediction_probabilities[idx])[::-1]
+                    
+                    # 현재 클래스를 제외한 다음 후보 찾기
+                    for next_class in prob_order:
+                        if next_class != class_id:
+                            balanced_predictions[idx] = next_class
+                            break
             
             elif current_count < target_count:
                 # 부족한 클래스로 일부 재할당
@@ -362,13 +444,42 @@ class Prediction:
                     other_class_probs = self.prediction_probabilities[other_indices, class_id]
                     high_prob_indices = other_indices[np.argsort(other_class_probs)[-add_count:]]
                     
-                    # 조건부 재할당 (원래 예측과의 차이가 크지 않은 경우만)
+                    # 조건부 재할당
                     for idx in high_prob_indices:
-                        original_prob = self.prediction_probabilities[idx, balanced_predictions[idx]]
+                        original_class = balanced_predictions[idx]
+                        original_prob = self.prediction_probabilities[idx, original_class]
                         target_prob = self.prediction_probabilities[idx, class_id]
                         
-                        if target_prob > 0.3 and (original_prob - target_prob) < 0.4:
+                        # 확률 차이가 크지 않은 경우에만 재할당
+                        if target_prob > 0.2 and (original_prob - target_prob) < 0.3:
                             balanced_predictions[idx] = class_id
+        
+        return balanced_predictions
+    
+    def _confidence_based_balancing(self, current_counts, target_distribution):
+        """신뢰도 기반 균형 조정"""
+        balanced_predictions = self.predictions.copy()
+        confidence_scores = np.max(self.prediction_probabilities, axis=1)
+        
+        for class_id in range(Config.N_CLASSES):
+            current_count = current_counts[class_id]
+            target_count = target_distribution[class_id]
+            
+            if current_count > target_count:
+                # 낮은 신뢰도 예측 제거
+                class_indices = np.where(balanced_predictions == class_id)[0]
+                class_confidences = confidence_scores[class_indices]
+                
+                remove_count = current_count - target_count
+                low_conf_indices = class_indices[np.argsort(class_confidences)[:remove_count]]
+                
+                # 재할당
+                for idx in low_conf_indices:
+                    prob_order = np.argsort(self.prediction_probabilities[idx])[::-1]
+                    for next_class in prob_order[1:]:
+                        if next_class != class_id:
+                            balanced_predictions[idx] = next_class
+                            break
         
         return balanced_predictions
     
@@ -389,7 +500,7 @@ class Prediction:
                 np.random.seed(Config.RANDOM_STATE + class_id)
                 remove_indices = np.random.choice(class_indices, remove_count, replace=False)
                 
-                # 부족한 클래스 중 하나로 재할당
+                # 부족한 클래스들에 할당
                 under_classes = [i for i in range(Config.N_CLASSES) 
                                if current_counts[i] < target_distribution[i]]
                 
@@ -412,17 +523,20 @@ class Prediction:
         distribution = dict(zip(unique, counts))
         
         print("클래스별 예측 개수:")
+        total_predictions = len(self.predictions)
         for class_id in range(Config.N_CLASSES):
             count = distribution.get(class_id, 0)
-            percentage = (count / len(self.predictions)) * 100
-            print(f"클래스 {class_id}: {count}개 ({percentage:.2f}%)")
+            percentage = (count / total_predictions) * 100
+            print(f"클래스 {class_id:2d}: {count:4d}개 ({percentage:5.2f}%)")
         
-        # 분포 균형도 분석
-        total_predictions = len(self.predictions)
+        # 분포 통계
         expected_per_class = total_predictions / Config.N_CLASSES
+        actual_counts = [distribution.get(i, 0) for i in range(Config.N_CLASSES)]
         
         print(f"\n총 예측 개수: {total_predictions}")
         print(f"클래스당 기대 개수: {expected_per_class:.1f}")
+        print(f"실제 분포 표준편차: {np.std(actual_counts):.2f}")
+        print(f"분포 변동계수: {np.std(actual_counts) / np.mean(actual_counts):.3f}")
         
         # 불균형 정도 계산
         imbalance_scores = []
@@ -445,13 +559,18 @@ class Prediction:
         
         # 성능 예측
         if avg_imbalance < 0.1:
-            print("분포 상태: 매우 균형적")
-        elif avg_imbalance < 0.2:
-            print("분포 상태: 균형적")
-        elif avg_imbalance < 0.4:
-            print("분포 상태: 약간 불균형")
+            balance_status = "매우 균형적"
+        elif avg_imbalance < 0.15:
+            balance_status = "균형적"
+        elif avg_imbalance < 0.25:
+            balance_status = "약간 불균형"
         else:
-            print("분포 상태: 심각한 불균형 - 균형 조정 권장")
+            balance_status = "심각한 불균형 - 균형 조정 필요"
+        
+        print(f"분포 상태: {balance_status}")
+        
+        # 클래스 분포 저장
+        self.class_distributions = distribution
         
         return {
             'distribution': distribution,
@@ -459,7 +578,9 @@ class Prediction:
             'expected_per_class': expected_per_class,
             'avg_imbalance': avg_imbalance,
             'missing_classes': missing_classes,
-            'balance_status': 'good' if avg_imbalance < 0.2 else 'poor'
+            'balance_status': 'good' if avg_imbalance < 0.2 else 'poor',
+            'std': np.std(actual_counts),
+            'cv': np.std(actual_counts) / np.mean(actual_counts)
         }
     
     @timer
@@ -511,9 +632,10 @@ class Prediction:
             invalid_count = invalid_predictions.sum()
             print(f"유효하지 않은 예측값 개수: {invalid_count}")
             
-            # 유효하지 않은 값들을 0으로 수정
-            submission_df.loc[invalid_predictions, Config.TARGET_COLUMN] = 0
-            print("유효하지 않은 예측값을 0으로 수정했습니다.")
+            # 유효하지 않은 값들을 가장 빈번한 클래스로 수정
+            most_frequent_class = submission_df[Config.TARGET_COLUMN].mode()[0]
+            submission_df.loc[invalid_predictions, Config.TARGET_COLUMN] = most_frequent_class
+            print(f"유효하지 않은 예측값을 {most_frequent_class}으로 수정했습니다.")
         
         # 파일 저장
         try:
@@ -597,7 +719,7 @@ class Prediction:
                         'support': np.sum(class_mask)
                     })
                     
-                    print(f"클래스 {class_id} - 정확도: {accuracy:.4f}, F1: {f1:.4f}, 지원: {np.sum(class_mask)}")
+                    print(f"클래스 {class_id:2d} - 정확도: {accuracy:.4f}, F1: {f1:.4f}, 지원: {np.sum(class_mask):4d}")
             
             avg_accuracy = np.mean([m['accuracy'] for m in class_metrics])
             avg_f1 = np.mean([m['f1'] for m in class_metrics])
@@ -610,7 +732,7 @@ class Prediction:
             if low_performance_classes:
                 print(f"\n성능이 낮은 클래스 ({len(low_performance_classes)}개):")
                 for m in low_performance_classes:
-                    print(f"  클래스 {m['class']}: F1={m['f1']:.3f}, 지원={m['support']}")
+                    print(f"  클래스 {m['class']:2d}: F1={m['f1']:.3f}, 지원={m['support']:4d}")
             
             return {
                 'macro_f1': macro_f1,
@@ -635,7 +757,7 @@ class Prediction:
             'latest_distribution': latest_prediction['distribution'].tolist(),
             'latest_timestamp': latest_prediction['timestamp'],
             'has_probabilities': self.prediction_probabilities is not None,
-            'balance_quality': self.analyze_prediction_distribution()
+            'balance_quality': self.analyze_prediction_distribution() if self.predictions is not None else None
         }
         
         return summary
