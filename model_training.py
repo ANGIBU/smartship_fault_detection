@@ -212,13 +212,13 @@ class ModelTraining:
             'kernel': 'rbf',
             'class_weight': 'balanced',
             'random_state': Config.RANDOM_STATE,
-            'probability': True,  # 확률 예측을 위해
-            'cache_size': 1000  # 메모리 할당량 증가
+            'probability': True,
+            'cache_size': 1000
         }
         
         # 데이터 크기에 따라 C 값 조정
         if X_train.shape[0] > 10000:
-            svm_params['C'] = 0.1  # 대용량 데이터에서는 낮은 C
+            svm_params['C'] = 0.1
         else:
             svm_params['C'] = 1.0
         
@@ -249,9 +249,8 @@ class ModelTraining:
         
         model = MLPClassifier(**nn_params)
         
-        # 클래스 가중치 적용
-        sample_weights = compute_sample_weight('balanced', y=y_train)
-        model.fit(X_train, y_train, sample_weight=sample_weights)
+        # MLPClassifier는 sample_weight를 지원하지 않으므로 제거
+        model.fit(X_train, y_train)
         
         self.models['neural_network'] = model
         self.logger.info("신경망 모델 훈련 완료")
