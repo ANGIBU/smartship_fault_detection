@@ -531,3 +531,129 @@ class ModelTraining:
         print(f"훈련된 모델 수: {len(self.models)}")
         
         return self.models, self.best_model
+    
+    @timer
+    def train_conservative_models(self, X_train, y_train):
+        """보수적 모델 훈련 (과적합 방지 강화)"""
+        print("보수적 모델 훈련 시작")
+        
+        # 과적합 방지를 위한 보수적 파라미터
+        conservative_lgbm_params = {
+            'objective': 'multiclass',
+            'num_class': Config.N_CLASSES,
+            'metric': 'multi_logloss',
+            'boosting_type': 'gbdt',
+            'is_unbalance': True,
+            'num_leaves': 31,  # 기본값으로 복잡도 감소
+            'learning_rate': 0.05,  # 낮은 학습률
+            'feature_fraction': 0.7,  # 피처 서브샘플링 강화
+            'bagging_fraction': 0.7,  # 배깅 강화
+            'bagging_freq': 5,
+            'min_child_samples': 20,  # 높은 값으로 과적합 방지
+            'min_child_weight': 0.01,
+            'min_split_gain': 0.01,
+            'reg_alpha': 0.1,  # L1 정규화 강화
+            'reg_lambda': 0.1,  # L2 정규화 강화
+            'max_depth': 6,  # 깊이 제한
+            'verbose': -1,
+            'random_state': Config.RANDOM_STATE,
+            'n_estimators': 200,  # 적은 트리 수
+            'n_jobs': Config.N_JOBS,
+            'force_col_wise': True
+        }
+        
+        conservative_xgb_params = {
+            'objective': 'multi:softprob',
+            'num_class': Config.N_CLASSES,
+            'learning_rate': 0.03,  # 매우 낮은 학습률
+            'max_depth': 4,  # 얕은 트리
+            'subsample': 0.6,  # 강한 서브샘플링
+            'colsample_bytree': 0.6,
+            'reg_alpha': 0.3,  # 강한 정규화
+            'reg_lambda': 0.3,
+            'gamma': 0.2,
+            'min_child_weight': 20,  # 높은 값
+            'random_state': Config.RANDOM_STATE,
+            'n_estimators': 150,  # 적은 트리 수
+            'n_jobs': Config.N_JOBS,
+            'tree_method': 'hist',
+            'verbosity': 0
+        }
+        
+        conservative_rf_params = {
+            'n_estimators': 100,  # 적은 트리 수
+            'max_depth': 6,  # 얕은 트리
+            'min_samples_split': 20,  # 높은 분할 기준
+            'min_samples_leaf': 10,
+            'max_features': 'sqrt',  # 피처 서브샘플링
+            'random_state': Config.RANDOM_STATE,
+            'n_jobs': Config.N_JOBS,
+            'class_weight': 'balanced',
+            'bootstrap': True
+        }
+        
+        # 보수적 모델들 훈련
+        conservative_models = {}
+        
+        # LightGBM
+        try:
+            lgbm_model = self.train_lightgbm(X_train, y_train, params=conservative_lgbm_params)
+            if lgbm_model is not None:
+                conservative_models['conservative_lightgbm'] = lgbm_model
+        except Exception as e:
+            print(f"보수적 LightGBM 훈련 실패: {e}")
+        
+        # XGBoost
+        try:
+            xgb_model = self.train_xgboost(X_train, y_train, params=conservative_xgb_params)
+            if xgb_model is not None:
+                conservative_models['conservative_xgboost'] = xgb_model
+        except Exception as e:
+            print(f"보수적 XGBoost 훈련 실패: {e}")
+        
+        # Random Forest
+        try:
+            rf_model = self.train_random_forest(X_train, y_train, params=conservative_rf_params)
+            if rf_model is not None:
+                conservative_models['conservative_random_forest'] = rf_model
+        except Exception as e:
+            print(f"보수적 Random Forest 훈련 실패: {e}")
+        
+        # 교차 검증으로 최고 모델 선택
+        if conservative_models:
+            print(f"보수적 모델 교차 검증 시작")
+            cv_strategy = StratifiedKFold(n_splits=3, shuffle=True, random_state=Config.RANDOM_STATE)
+            
+            best_score = 0
+            best_conservative_model = None
+            
+            for model_name, model in conservative_models.items():
+                try:
+                    cv_scores = cross_val_score(
+                        model, X_train, y_train, 
+                        cv=cv_strategy, scoring=self.scorer, n_jobs=1
+                    )
+                    
+                    mean_score = cv_scores.mean()
+                    std_score = cv_scores.std()
+                    
+                    print(f"{model_name} CV: {mean_score:.4f} (+/- {std_score*2:.4f})")
+                    
+                    if mean_score > best_score:
+                        best_score = mean_score
+                        best_conservative_model = model
+                        
+                except Exception as e:
+                    print(f"{model_name} 교차 검증 실패: {e}")
+                    continue
+            
+            if best_conservative_model is not None:
+                print(f"최고 보수적 모델 선택 완료, CV 점수: {best_score:.4f}")
+                
+                # 최고 모델 저장
+                save_model(best_conservative_model, Config.MODEL_FILE)
+                
+                return conservative_models, best_conservative_model
+        
+        print("보수적 모델 훈련 실패, 기존 모델 사용")
+        return {}, self.best_model

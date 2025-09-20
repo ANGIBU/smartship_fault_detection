@@ -301,17 +301,96 @@ class DataProcessor:
         return X_train_scaled, X_test_scaled
     
     @timer
-    def select_features(self, X_train, X_test, y_train, method='mutual_info', k=None):
-        """피처 선택"""
+    def select_features(self, X_train, X_test, y_train, method='conservative', k=None):
+        """피처 선택 (과적합 방지 강화)"""
         if k is None:
-            k = Config.FEATURE_SELECTION_K
+            k = min(25, X_train.shape[1])  # 더 적은 피처 선택
         
         k = min(k, X_train.shape[1])
         
         print(f"피처 선택 시작 ({method}, k={k})")
         print(f"원본 피처 개수: {X_train.shape[1]}")
         
-        if method == 'mutual_info':
+        if method == 'conservative':
+            # 여러 방법을 조합한 보수적 피처 선택
+            print("보수적 피처 선택 적용")
+            
+            # 1. 분산 기반 사전 필터링
+            from sklearn.feature_selection import VarianceThreshold
+            var_threshold = VarianceThreshold(threshold=0.01)
+            X_train_var = var_threshold.fit_transform(X_train)
+            X_test_var = var_threshold.transform(X_test)
+            
+            var_features = X_train.columns[var_threshold.get_support()].tolist()
+            print(f"분산 필터링 후 피처 수: {len(var_features)}")
+            
+            # DataFrame 재구성
+            X_train_filtered = pd.DataFrame(X_train_var, columns=var_features, index=X_train.index)
+            X_test_filtered = pd.DataFrame(X_test_var, columns=var_features, index=X_test.index)
+            
+            # 2. 상관관계 기반 중복 제거
+            corr_matrix = X_train_filtered.corr().abs()
+            upper_tri = corr_matrix.where(
+                np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+            )
+            
+            # 0.95 이상 상관관계 피처 제거
+            high_corr_features = [column for column in upper_tri.columns if any(upper_tri[column] > 0.95)]
+            
+            remaining_features = [f for f in var_features if f not in high_corr_features]
+            print(f"상관관계 필터링 후 피처 수: {len(remaining_features)}")
+            
+            X_train_corr = X_train_filtered[remaining_features]
+            X_test_corr = X_test_filtered[remaining_features]
+            
+            # 3. 안정적인 피처 선택 방법 조합
+            if len(remaining_features) > k:
+                # F-test와 mutual_info의 교집합 사용
+                from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
+                
+                # 더 많은 피처를 선택한 후 교집합 구하기
+                k_extended = min(k * 2, len(remaining_features))
+                
+                # F-test 기반 선택
+                f_selector = SelectKBest(f_classif, k=k_extended)
+                f_selector.fit(X_train_corr, y_train)
+                f_features = X_train_corr.columns[f_selector.get_support()].tolist()
+                
+                # Mutual Info 기반 선택 (샘플링으로 안정성 확보)
+                sample_size = min(5000, len(X_train_corr))
+                sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
+                    len(X_train_corr), sample_size, replace=False
+                )
+                X_sample = X_train_corr.iloc[sample_idx]
+                y_sample = y_train.iloc[sample_idx]
+                
+                mi_selector = SelectKBest(mutual_info_classif, k=k_extended)
+                mi_selector.fit(X_sample, y_sample)
+                mi_features = X_train_corr.columns[mi_selector.get_support()].tolist()
+                
+                # 교집합 구하기
+                common_features = list(set(f_features) & set(mi_features))
+                
+                # 교집합이 충분하지 않으면 F-test 결과 우선 사용
+                if len(common_features) < k:
+                    print(f"교집합 피처 수 부족 ({len(common_features)}), F-test 결과 사용")
+                    selected_features = f_features[:k]
+                else:
+                    # 교집합에서 k개 선택 (F-test 점수 기준)
+                    f_scores = f_selector.scores_
+                    f_feature_scores = dict(zip(X_train_corr.columns, f_scores))
+                    
+                    common_scores = [(f, f_feature_scores[f]) for f in common_features]
+                    common_scores.sort(key=lambda x: x[1], reverse=True)
+                    
+                    selected_features = [f for f, _ in common_scores[:k]]
+                
+                self.selected_features = selected_features
+                
+            else:
+                self.selected_features = remaining_features
+            
+        elif method == 'mutual_info':
             selector = SelectKBest(mutual_info_classif, k=k)
         elif method == 'f_classif':
             selector = SelectKBest(f_classif, k=k)
@@ -353,39 +432,44 @@ class DataProcessor:
         else:
             selector = SelectKBest(mutual_info_classif, k=k)
         
-        # 샘플링으로 피처 선택
-        if len(X_train) > 5000 and method in ['mutual_info', 'f_classif']:
-            sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
-                len(X_train), 5000, replace=False
+        if method != 'conservative':
+            # 샘플링으로 피처 선택
+            if len(X_train) > 5000 and method in ['mutual_info', 'f_classif']:
+                sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
+                    len(X_train), 5000, replace=False
+                )
+                X_sample = X_train.iloc[sample_idx]
+                y_sample = y_train.iloc[sample_idx]
+                selector.fit(X_sample, y_sample)
+                del X_sample, y_sample
+            else:
+                selector.fit(X_train, y_train)
+            
+            X_train_selected = selector.transform(X_train)
+            X_test_selected = selector.transform(X_test)
+            
+            selected_mask = selector.get_support()
+            self.selected_features = X_train.columns[selected_mask].tolist()
+            
+            X_train_selected = pd.DataFrame(
+                X_train_selected, 
+                columns=self.selected_features, 
+                index=X_train.index,
+                dtype='float32'
             )
-            X_sample = X_train.iloc[sample_idx]
-            y_sample = y_train.iloc[sample_idx]
-            selector.fit(X_sample, y_sample)
-            del X_sample, y_sample
+            X_test_selected = pd.DataFrame(
+                X_test_selected, 
+                columns=self.selected_features, 
+                index=X_test.index,
+                dtype='float32'
+            )
+            
+            self.feature_selector = selector
+            save_joblib(self.feature_selector, Config.FEATURE_SELECTOR_FILE)
         else:
-            selector.fit(X_train, y_train)
-        
-        X_train_selected = selector.transform(X_train)
-        X_test_selected = selector.transform(X_test)
-        
-        selected_mask = selector.get_support()
-        self.selected_features = X_train.columns[selected_mask].tolist()
-        
-        X_train_selected = pd.DataFrame(
-            X_train_selected, 
-            columns=self.selected_features, 
-            index=X_train.index,
-            dtype='float32'
-        )
-        X_test_selected = pd.DataFrame(
-            X_test_selected, 
-            columns=self.selected_features, 
-            index=X_test.index,
-            dtype='float32'
-        )
-        
-        self.feature_selector = selector
-        save_joblib(self.feature_selector, Config.FEATURE_SELECTOR_FILE)
+            # 보수적 방법의 경우
+            X_train_selected = X_train[self.selected_features].copy()
+            X_test_selected = X_test[self.selected_features].copy()
         
         print(f"선택된 피처 개수: {len(self.selected_features)}")
         
@@ -416,12 +500,12 @@ class DataProcessor:
             # 3. 스케일링
             X_train, X_test = self.scale_features(X_train, X_test, scaling_method)
             
-            # 4. 피처 선택
+            # 4. 피처 선택 (보수적 방법 사용)
             if use_feature_selection:
-                available_features = min(Config.FEATURE_SELECTION_K, X_train.shape[1])
+                available_features = min(25, X_train.shape[1])  # 더 적은 피처 선택
                 X_train, X_test = self.select_features(
                     X_train, X_test, y_train, 
-                    method='mutual_info', 
+                    method='conservative',  # 보수적 피처 선택 사용
                     k=available_features
                 )
             
