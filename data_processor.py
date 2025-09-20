@@ -32,16 +32,42 @@ class DataProcessor:
         
         # 메모리 효율적 로드
         dtypes = {col: 'float32' for col in self.feature_columns}
+        dtypes[Config.ID_COLUMN] = 'int32'
         
-        train_df = pd.read_csv(Config.TRAIN_FILE, dtype=dtypes)
-        test_df = pd.read_csv(Config.TEST_FILE, dtype=dtypes)
+        # 청크 단위로 로드
+        train_chunks = []
+        test_chunks = []
+        
+        try:
+            # 훈련 데이터 로드
+            for chunk in pd.read_csv(Config.TRAIN_FILE, dtype=dtypes, chunksize=Config.CHUNK_SIZE):
+                # 메모리 사용량 감소
+                if Config.TARGET_COLUMN in chunk.columns:
+                    chunk[Config.TARGET_COLUMN] = chunk[Config.TARGET_COLUMN].astype('int16')
+                train_chunks.append(chunk)
+            
+            train_df = pd.concat(train_chunks, ignore_index=True)
+            del train_chunks
+            gc.collect()
+            
+            # 테스트 데이터 로드
+            for chunk in pd.read_csv(Config.TEST_FILE, dtype=dtypes, chunksize=Config.CHUNK_SIZE):
+                test_chunks.append(chunk)
+            
+            test_df = pd.concat(test_chunks, ignore_index=True)
+            del test_chunks
+            gc.collect()
+            
+        except Exception as e:
+            print(f"청크 로드 실패, 일반 로드 시도: {e}")
+            train_df = pd.read_csv(Config.TRAIN_FILE, dtype=dtypes)
+            test_df = pd.read_csv(Config.TEST_FILE, dtype=dtypes)
+            
+            if Config.TARGET_COLUMN in train_df.columns:
+                train_df[Config.TARGET_COLUMN] = train_df[Config.TARGET_COLUMN].astype('int16')
         
         print(f"Train 데이터 형태: {train_df.shape}")
         print(f"Test 데이터 형태: {test_df.shape}")
-        
-        # 타겟 컬럼 처리
-        if Config.TARGET_COLUMN in train_df.columns:
-            train_df[Config.TARGET_COLUMN] = train_df[Config.TARGET_COLUMN].astype('int32')
         
         # 데이터 품질 검사
         train_quality = check_data_quality(train_df, self.feature_columns)
@@ -75,25 +101,61 @@ class DataProcessor:
         """기본 통계 피처 생성"""
         print("기본 통계 피처 생성 중")
         
-        for df in [X_train, X_test]:
-            arr = df[self.feature_columns].values
+        # 배치 처리로 메모리 절약
+        batch_size = 1000
+        n_samples_train = len(X_train)
+        n_samples_test = len(X_test)
+        
+        # 결과 저장용 배열
+        train_features = {}
+        test_features = {}
+        
+        # 피처 이름 리스트
+        feature_names = ['sensor_mean', 'sensor_std', 'sensor_median', 'sensor_min', 'sensor_max', 
+                        'sensor_range', 'sensor_q25', 'sensor_q75', 'sensor_iqr', 'sensor_skew', 'sensor_kurtosis']
+        
+        for name in feature_names:
+            train_features[name] = np.zeros(n_samples_train, dtype='float32')
+            test_features[name] = np.zeros(n_samples_test, dtype='float32')
+        
+        # 훈련 데이터 배치 처리
+        for i in range(0, n_samples_train, batch_size):
+            end_idx = min(i + batch_size, n_samples_train)
+            batch_data = X_train[self.feature_columns].iloc[i:end_idx].values
             
-            # 기본 통계량
-            df['sensor_mean'] = np.mean(arr, axis=1).astype('float32')
-            df['sensor_std'] = np.std(arr, axis=1).astype('float32')
-            df['sensor_median'] = np.median(arr, axis=1).astype('float32')
-            df['sensor_min'] = np.min(arr, axis=1).astype('float32')
-            df['sensor_max'] = np.max(arr, axis=1).astype('float32')
-            df['sensor_range'] = (df['sensor_max'] - df['sensor_min']).astype('float32')
+            train_features['sensor_mean'][i:end_idx] = np.mean(batch_data, axis=1)
+            train_features['sensor_std'][i:end_idx] = np.std(batch_data, axis=1)
+            train_features['sensor_median'][i:end_idx] = np.median(batch_data, axis=1)
+            train_features['sensor_min'][i:end_idx] = np.min(batch_data, axis=1)
+            train_features['sensor_max'][i:end_idx] = np.max(batch_data, axis=1)
+            train_features['sensor_range'][i:end_idx] = train_features['sensor_max'][i:end_idx] - train_features['sensor_min'][i:end_idx]
+            train_features['sensor_q25'][i:end_idx] = np.percentile(batch_data, 25, axis=1)
+            train_features['sensor_q75'][i:end_idx] = np.percentile(batch_data, 75, axis=1)
+            train_features['sensor_iqr'][i:end_idx] = train_features['sensor_q75'][i:end_idx] - train_features['sensor_q25'][i:end_idx]
+            train_features['sensor_skew'][i:end_idx] = skew(batch_data, axis=1, nan_policy='omit')
+            train_features['sensor_kurtosis'][i:end_idx] = kurtosis(batch_data, axis=1, nan_policy='omit')
+        
+        # 테스트 데이터 배치 처리
+        for i in range(0, n_samples_test, batch_size):
+            end_idx = min(i + batch_size, n_samples_test)
+            batch_data = X_test[self.feature_columns].iloc[i:end_idx].values
             
-            # 분위수
-            df['sensor_q25'] = np.percentile(arr, 25, axis=1).astype('float32')
-            df['sensor_q75'] = np.percentile(arr, 75, axis=1).astype('float32')
-            df['sensor_iqr'] = (df['sensor_q75'] - df['sensor_q25']).astype('float32')
-            
-            # 형태 통계량
-            df['sensor_skew'] = skew(arr, axis=1, nan_policy='omit').astype('float32')
-            df['sensor_kurtosis'] = kurtosis(arr, axis=1, nan_policy='omit').astype('float32')
+            test_features['sensor_mean'][i:end_idx] = np.mean(batch_data, axis=1)
+            test_features['sensor_std'][i:end_idx] = np.std(batch_data, axis=1)
+            test_features['sensor_median'][i:end_idx] = np.median(batch_data, axis=1)
+            test_features['sensor_min'][i:end_idx] = np.min(batch_data, axis=1)
+            test_features['sensor_max'][i:end_idx] = np.max(batch_data, axis=1)
+            test_features['sensor_range'][i:end_idx] = test_features['sensor_max'][i:end_idx] - test_features['sensor_min'][i:end_idx]
+            test_features['sensor_q25'][i:end_idx] = np.percentile(batch_data, 25, axis=1)
+            test_features['sensor_q75'][i:end_idx] = np.percentile(batch_data, 75, axis=1)
+            test_features['sensor_iqr'][i:end_idx] = test_features['sensor_q75'][i:end_idx] - test_features['sensor_q25'][i:end_idx]
+            test_features['sensor_skew'][i:end_idx] = skew(batch_data, axis=1, nan_policy='omit')
+            test_features['sensor_kurtosis'][i:end_idx] = kurtosis(batch_data, axis=1, nan_policy='omit')
+        
+        # DataFrame에 추가
+        for name in feature_names:
+            X_train[name] = train_features[name]
+            X_test[name] = test_features[name]
         
         return X_train, X_test
     
@@ -104,13 +166,17 @@ class DataProcessor:
         for group_name, sensors in self.sensor_groups.items():
             valid_sensors = [s for s in sensors if s in self.feature_columns]
             if len(valid_sensors) >= 2:
+                # 메모리 효율적 처리
                 for df in [X_train, X_test]:
-                    group_data = df[valid_sensors].values
+                    group_data = df[valid_sensors].values.astype('float32')
                     
                     df[f'{group_name}_mean'] = np.mean(group_data, axis=1).astype('float32')
                     df[f'{group_name}_std'] = np.std(group_data, axis=1).astype('float32')
                     df[f'{group_name}_max'] = np.max(group_data, axis=1).astype('float32')
                     df[f'{group_name}_min'] = np.min(group_data, axis=1).astype('float32')
+                    
+                    # 메모리 정리
+                    del group_data
         
         return X_train, X_test
     
@@ -123,6 +189,10 @@ class DataProcessor:
         X_train = train_df[self.feature_columns].copy()
         X_test = test_df[self.feature_columns].copy()
         y_train = train_df[Config.TARGET_COLUMN].copy()
+        
+        # 메모리 정리
+        del train_df, test_df
+        gc.collect()
         
         # 기본 통계 피처 생성
         if Config.STATISTICAL_FEATURES:
@@ -141,16 +211,16 @@ class DataProcessor:
         # 무한값과 NaN 처리
         for df in [X_train, X_test]:
             # 무한값을 NaN으로 변환
-            df.replace([np.inf, -np.inf], np.nan, inplace=True)
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
             
             # NaN을 중앙값으로 대체
-            for col in df.columns:
+            for col in numeric_cols:
                 if df[col].isna().any():
-                    if df[col].dtype in ['float32', 'float64']:
-                        fill_value = df[col].median()
-                        if pd.isna(fill_value):
-                            fill_value = 0.0
-                        df[col].fillna(fill_value, inplace=True)
+                    fill_value = df[col].median()
+                    if pd.isna(fill_value):
+                        fill_value = 0.0
+                    df[col].fillna(fill_value, inplace=True)
             
             # 데이터 타입 최적화
             for col in df.select_dtypes(include=['float64']).columns:
@@ -184,8 +254,21 @@ class DataProcessor:
         else:
             self.scaler = RobustScaler()
         
-        # 스케일링 수행
-        X_train_scaled = self.scaler.fit_transform(X_train)
+        # 배치 스케일링으로 메모리 절약
+        if len(X_train) > 10000:
+            # 샘플링하여 스케일러 피팅
+            sample_size = min(10000, len(X_train))
+            sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
+                len(X_train), sample_size, replace=False
+            )
+            X_sample = X_train.iloc[sample_idx]
+            self.scaler.fit(X_sample)
+            del X_sample
+        else:
+            self.scaler.fit(X_train)
+        
+        # 변환 수행
+        X_train_scaled = self.scaler.transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
         # DataFrame 변환
@@ -203,6 +286,9 @@ class DataProcessor:
         )
         
         save_joblib(self.scaler, Config.SCALER_FILE)
+        
+        # 메모리 정리
+        gc.collect()
         
         return X_train_scaled, X_test_scaled
     
@@ -222,26 +308,56 @@ class DataProcessor:
         elif method == 'f_classif':
             selector = SelectKBest(f_classif, k=k)
         elif method == 'random_forest':
+            # 메모리 효율적 RF 피처 선택
             rf = RandomForestClassifier(
-                n_estimators=100, 
+                n_estimators=50,  # 메모리 절약
                 random_state=Config.RANDOM_STATE,
-                n_jobs=2,
+                n_jobs=1,
                 max_depth=5
             )
-            rf.fit(X_train, y_train)
+            
+            # 샘플링으로 피팅
+            if len(X_train) > 5000:
+                sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
+                    len(X_train), 5000, replace=False
+                )
+                X_sample = X_train.iloc[sample_idx]
+                y_sample = y_train.iloc[sample_idx]
+                rf.fit(X_sample, y_sample)
+                del X_sample, y_sample
+            else:
+                rf.fit(X_train, y_train)
+            
             importances = rf.feature_importances_
             indices = np.argsort(importances)[::-1][:k]
             
-            X_train_selected = X_train.iloc[:, indices]
-            X_test_selected = X_test.iloc[:, indices]
+            X_train_selected = X_train.iloc[:, indices].copy()
+            X_test_selected = X_test.iloc[:, indices].copy()
             self.selected_features = X_train.columns[indices].tolist()
             
             print(f"선택된 피처 개수: {len(self.selected_features)}")
+            
+            # 메모리 정리
+            del rf
+            gc.collect()
+            
             return X_train_selected, X_test_selected
         else:
             selector = SelectKBest(mutual_info_classif, k=k)
         
-        X_train_selected = selector.fit_transform(X_train, y_train)
+        # 샘플링으로 피처 선택
+        if len(X_train) > 5000 and method in ['mutual_info', 'f_classif']:
+            sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
+                len(X_train), 5000, replace=False
+            )
+            X_sample = X_train.iloc[sample_idx]
+            y_sample = y_train.iloc[sample_idx]
+            selector.fit(X_sample, y_sample)
+            del X_sample, y_sample
+        else:
+            selector.fit(X_train, y_train)
+        
+        X_train_selected = selector.transform(X_train)
         X_test_selected = selector.transform(X_test)
         
         selected_mask = selector.get_support()
@@ -277,6 +393,10 @@ class DataProcessor:
         try:
             # 1. 데이터 로드
             train_df, test_df = self.load_and_preprocess_data()
+            
+            # ID 컬럼 저장
+            train_ids = train_df[Config.ID_COLUMN].copy()
+            test_ids = test_df[Config.ID_COLUMN].copy()
             
             # 2. 피처 엔지니어링
             X_train, X_test, y_train = self.feature_engineering(train_df, test_df)
@@ -318,10 +438,6 @@ class DataProcessor:
             
             # 메모리 최종 정리
             gc.collect()
-            
-            # ID 컬럼 반환을 위한 원본 로드
-            train_ids = pd.read_csv(Config.TRAIN_FILE, usecols=[Config.ID_COLUMN])[Config.ID_COLUMN]
-            test_ids = pd.read_csv(Config.TEST_FILE, usecols=[Config.ID_COLUMN])[Config.ID_COLUMN]
             
             return X_train, X_test, y_train, train_ids, test_ids
             

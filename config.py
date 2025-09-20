@@ -32,7 +32,7 @@ class Config:
     # 모델 설정
     N_CLASSES = 21
     RANDOM_STATE = 42
-    N_JOBS = 4
+    N_JOBS = 2  # 메모리 사용량 감소
     
     # 교차 검증 설정
     CV_FOLDS = 5
@@ -81,32 +81,32 @@ class Config:
         'random_state': RANDOM_STATE,
         'n_estimators': 500,
         'n_jobs': N_JOBS,
-        'is_unbalance': True
+        'is_unbalance': True,
+        'force_col_wise': True  # 메모리 최적화
     }
     
-    # XGBoost 파라미터
+    # XGBoost 파라미터 (호환성 개선)
     XGB_PARAMS = {
         'objective': 'multi:softprob',
         'num_class': N_CLASSES,
-        'eval_metric': 'mlogloss',
-        'learning_rate': 0.05,
+        'learning_rate': 0.08,
         'max_depth': 6,
         'subsample': 0.8,
         'colsample_bytree': 0.8,
-        'colsample_bylevel': 0.8,
         'reg_alpha': 0.1,
         'reg_lambda': 0.1,
         'gamma': 0.1,
         'min_child_weight': 10,
         'random_state': RANDOM_STATE,
-        'n_estimators': 500,
+        'n_estimators': 300,  # 메모리 절약
         'n_jobs': N_JOBS,
-        'tree_method': 'hist'
+        'tree_method': 'hist',
+        'verbosity': 0
     }
     
     # Random Forest 파라미터
     RF_PARAMS = {
-        'n_estimators': 300,
+        'n_estimators': 200,  # 메모리 절약
         'max_depth': 10,
         'min_samples_split': 10,
         'min_samples_leaf': 5,
@@ -119,7 +119,7 @@ class Config:
     
     # Gradient Boosting 파라미터
     GB_PARAMS = {
-        'n_estimators': 300,
+        'n_estimators': 200,  # 메모리 절약
         'learning_rate': 0.1,
         'max_depth': 6,
         'min_samples_split': 10,
@@ -130,8 +130,8 @@ class Config:
     }
     
     # 하이퍼파라미터 튜닝 설정
-    OPTUNA_TRIALS = 15
-    OPTUNA_TIMEOUT = 1800
+    OPTUNA_TRIALS = 12  # 시간 절약
+    OPTUNA_TIMEOUT = 1500  # 시간 절약
     
     # 앙상블 설정
     MIN_CV_SCORE = 0.70
@@ -146,6 +146,7 @@ class Config:
     # 메모리 설정
     MEMORY_EFFICIENT = True
     DTYPE_OPTIMIZATION = True
+    CHUNK_SIZE = 5000  # 메모리 절약
     
     @classmethod
     def create_directories(cls):
@@ -179,17 +180,19 @@ class Config:
         """데이터 크기에 따른 파라미터 조정"""
         adjustments = {}
         
+        # 메모리 사용량 기반 조정
         if n_samples > 50000:
             adjustments.update({
                 'cv_folds': 3,
-                'n_estimators': 300,
-                'optuna_trials': 10
+                'n_estimators': 200,
+                'optuna_trials': 8,
+                'n_jobs': 1
             })
         elif n_samples < 10000:
             adjustments.update({
                 'cv_folds': 7,
-                'n_estimators': 700,
-                'optuna_trials': 20
+                'n_estimators': 400,
+                'optuna_trials': 15
             })
         
         if n_features > 100:
@@ -203,4 +206,78 @@ class Config:
                 'max_depth': 8
             })
         
+        # 시스템 리소스 기반 조정
+        try:
+            import psutil
+            available_memory_gb = psutil.virtual_memory().available / (1024**3)
+            
+            if available_memory_gb < 8:
+                adjustments.update({
+                    'n_jobs': 1,
+                    'chunk_size': 2000,
+                    'n_estimators': 100
+                })
+            elif available_memory_gb > 32:
+                adjustments.update({
+                    'n_jobs': min(4, cls.N_JOBS * 2),
+                    'chunk_size': 10000
+                })
+        except ImportError:
+            pass
+        
         return adjustments
+    
+    @classmethod
+    def get_memory_efficient_params(cls):
+        """메모리 효율적 파라미터 반환"""
+        return {
+            'lgbm': {
+                **cls.LGBM_PARAMS,
+                'n_estimators': 300,
+                'num_leaves': 31,
+                'force_col_wise': True
+            },
+            'xgb': {
+                **cls.XGB_PARAMS,
+                'n_estimators': 200,
+                'max_depth': 5,
+                'tree_method': 'hist'
+            },
+            'rf': {
+                **cls.RF_PARAMS,
+                'n_estimators': 100,
+                'max_depth': 8
+            },
+            'gb': {
+                **cls.GB_PARAMS,
+                'n_estimators': 150,
+                'max_depth': 5
+            }
+        }
+    
+    @classmethod
+    def validate_config(cls):
+        """설정값 검증"""
+        errors = []
+        
+        # 필수 디렉터리 확인
+        if not cls.DATA_DIR.exists():
+            errors.append(f"데이터 디렉터리가 없습니다: {cls.DATA_DIR}")
+        
+        # 필수 파일 확인
+        required_files = [cls.TRAIN_FILE, cls.TEST_FILE]
+        for file_path in required_files:
+            if not file_path.exists():
+                errors.append(f"필수 파일이 없습니다: {file_path}")
+        
+        # 파라미터 검증
+        if cls.N_CLASSES <= 0:
+            errors.append("N_CLASSES는 양수여야 합니다")
+        
+        if cls.CV_FOLDS < 2:
+            errors.append("CV_FOLDS는 2 이상이어야 합니다")
+        
+        if cls.FEATURE_SELECTION_K <= 0:
+            errors.append("FEATURE_SELECTION_K는 양수여야 합니다")
+        
+        return errors

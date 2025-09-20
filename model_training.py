@@ -108,14 +108,26 @@ class ModelTraining:
             
             model = xgb.XGBClassifier(**params)
             
+            # XGBoost 버전 호환성 처리
             if X_val is not None and y_val is not None:
-                model.fit(
-                    X_train, y_train, 
-                    sample_weight=sample_weights,
-                    eval_set=[(X_val, y_val)],
-                    early_stopping_rounds=50,
-                    verbose=False
-                )
+                try:
+                    # 새로운 방식 시도
+                    model.fit(
+                        X_train, y_train, 
+                        sample_weight=sample_weights,
+                        eval_set=[(X_val, y_val)],
+                        early_stopping_rounds=50,
+                        verbose=False
+                    )
+                except TypeError:
+                    # 구버전 XGBoost 호환
+                    model.fit(
+                        X_train, y_train, 
+                        sample_weight=sample_weights,
+                        eval_set=[(X_val, y_val)],
+                        eval_metric='mlogloss',
+                        verbose=False
+                    )
             else:
                 model.fit(X_train, y_train, sample_weight=sample_weights)
             
@@ -127,7 +139,32 @@ class ModelTraining:
         except Exception as e:
             print(f"XGBoost 훈련 중 오류 발생: {e}")
             self.logger.error(f"XGBoost 훈련 실패: {e}")
-            return None
+            
+            # 기본 파라미터로 재시도
+            try:
+                print("기본 설정으로 XGBoost 재시도")
+                basic_params = {
+                    'objective': 'multi:softprob',
+                    'num_class': Config.N_CLASSES,
+                    'learning_rate': 0.1,
+                    'max_depth': 6,
+                    'random_state': Config.RANDOM_STATE,
+                    'n_estimators': 100,
+                    'n_jobs': 1
+                }
+                
+                model = xgb.XGBClassifier(**basic_params)
+                model.fit(X_train, y_train, sample_weight=sample_weights)
+                
+                self.models['xgboost'] = model
+                self.logger.info("XGBoost 기본 설정으로 훈련 완료")
+                
+                return model
+                
+            except Exception as e2:
+                print(f"XGBoost 기본 설정도 실패: {e2}")
+                self.logger.error(f"XGBoost 완전 실패: {e2}")
+                return None
     
     @timer
     def train_random_forest(self, X_train, y_train, params=None):
@@ -220,7 +257,6 @@ class ModelTraining:
                     params = {
                         'objective': 'multi:softprob',
                         'num_class': Config.N_CLASSES,
-                        'eval_metric': 'mlogloss',
                         'learning_rate': trial.suggest_float('learning_rate', 0.05, 0.15),
                         'max_depth': trial.suggest_int('max_depth', 4, 10),
                         'subsample': trial.suggest_float('subsample', 0.7, 0.9),
