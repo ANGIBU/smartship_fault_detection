@@ -111,7 +111,7 @@ class ModelTraining:
             # XGBoost 버전 호환성 처리
             if X_val is not None and y_val is not None:
                 try:
-                    # 새로운 방식 시도
+                    # XGBoost 2.0+ 방식
                     model.fit(
                         X_train, y_train, 
                         sample_weight=sample_weights,
@@ -119,15 +119,19 @@ class ModelTraining:
                         early_stopping_rounds=50,
                         verbose=False
                     )
-                except TypeError:
-                    # 구버전 XGBoost 호환
-                    model.fit(
-                        X_train, y_train, 
-                        sample_weight=sample_weights,
-                        eval_set=[(X_val, y_val)],
-                        eval_metric='mlogloss',
-                        verbose=False
-                    )
+                except (TypeError, ValueError) as e:
+                    print(f"XGBoost 새 방식 실패, 이전 방식 시도: {e}")
+                    try:
+                        # XGBoost 1.x 방식
+                        model.fit(
+                            X_train, y_train, 
+                            sample_weight=sample_weights,
+                            eval_set=[(X_val, y_val)],
+                            verbose=False
+                        )
+                    except Exception as e2:
+                        print(f"XGBoost 검증 세트 사용 실패, 단순 훈련: {e2}")
+                        model.fit(X_train, y_train, sample_weight=sample_weights)
             else:
                 model.fit(X_train, y_train, sample_weight=sample_weights)
             
@@ -150,7 +154,8 @@ class ModelTraining:
                     'max_depth': 6,
                     'random_state': Config.RANDOM_STATE,
                     'n_estimators': 100,
-                    'n_jobs': 1
+                    'n_jobs': 1,
+                    'verbosity': 0
                 }
                 
                 model = xgb.XGBClassifier(**basic_params)
@@ -268,7 +273,8 @@ class ModelTraining:
                         'random_state': Config.RANDOM_STATE,
                         'n_estimators': trial.suggest_int('n_estimators', 300, 600),
                         'n_jobs': 1,
-                        'tree_method': 'hist'
+                        'tree_method': 'hist',
+                        'verbosity': 0
                     }
                     
                     # 클래스 가중치 계산
@@ -534,30 +540,30 @@ class ModelTraining:
     
     @timer
     def train_conservative_models(self, X_train, y_train):
-        """보수적 모델 훈련 (과적합 방지 강화)"""
+        """보수적 모델 훈련"""
         print("보수적 모델 훈련 시작")
         
-        # 과적합 방지를 위한 보수적 파라미터
+        # 보수적 파라미터
         conservative_lgbm_params = {
             'objective': 'multiclass',
             'num_class': Config.N_CLASSES,
             'metric': 'multi_logloss',
             'boosting_type': 'gbdt',
             'is_unbalance': True,
-            'num_leaves': 31,  # 기본값으로 복잡도 감소
-            'learning_rate': 0.05,  # 낮은 학습률
-            'feature_fraction': 0.7,  # 피처 서브샘플링 강화
-            'bagging_fraction': 0.7,  # 배깅 강화
+            'num_leaves': 31,
+            'learning_rate': 0.05,
+            'feature_fraction': 0.7,
+            'bagging_fraction': 0.7,
             'bagging_freq': 5,
-            'min_child_samples': 20,  # 높은 값으로 과적합 방지
+            'min_child_samples': 20,
             'min_child_weight': 0.01,
             'min_split_gain': 0.01,
-            'reg_alpha': 0.1,  # L1 정규화 강화
-            'reg_lambda': 0.1,  # L2 정규화 강화
-            'max_depth': 6,  # 깊이 제한
+            'reg_alpha': 0.1,
+            'reg_lambda': 0.1,
+            'max_depth': 6,
             'verbose': -1,
             'random_state': Config.RANDOM_STATE,
-            'n_estimators': 200,  # 적은 트리 수
+            'n_estimators': 200,
             'n_jobs': Config.N_JOBS,
             'force_col_wise': True
         }
@@ -565,27 +571,27 @@ class ModelTraining:
         conservative_xgb_params = {
             'objective': 'multi:softprob',
             'num_class': Config.N_CLASSES,
-            'learning_rate': 0.03,  # 매우 낮은 학습률
-            'max_depth': 4,  # 얕은 트리
-            'subsample': 0.6,  # 강한 서브샘플링
+            'learning_rate': 0.03,
+            'max_depth': 4,
+            'subsample': 0.6,
             'colsample_bytree': 0.6,
-            'reg_alpha': 0.3,  # 강한 정규화
+            'reg_alpha': 0.3,
             'reg_lambda': 0.3,
             'gamma': 0.2,
-            'min_child_weight': 20,  # 높은 값
+            'min_child_weight': 20,
             'random_state': Config.RANDOM_STATE,
-            'n_estimators': 150,  # 적은 트리 수
+            'n_estimators': 150,
             'n_jobs': Config.N_JOBS,
             'tree_method': 'hist',
             'verbosity': 0
         }
         
         conservative_rf_params = {
-            'n_estimators': 100,  # 적은 트리 수
-            'max_depth': 6,  # 얕은 트리
-            'min_samples_split': 20,  # 높은 분할 기준
+            'n_estimators': 100,
+            'max_depth': 6,
+            'min_samples_split': 20,
             'min_samples_leaf': 10,
-            'max_features': 'sqrt',  # 피처 서브샘플링
+            'max_features': 'sqrt',
             'random_state': Config.RANDOM_STATE,
             'n_jobs': Config.N_JOBS,
             'class_weight': 'balanced',
