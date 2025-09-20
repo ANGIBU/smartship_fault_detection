@@ -32,7 +32,7 @@ class DataProcessor:
         
         # 메모리 효율적 로드
         dtypes = {col: 'float32' for col in self.feature_columns}
-        dtypes[Config.ID_COLUMN] = 'int32'
+        # ID 컬럼은 문자열이므로 dtype 지정하지 않음
         
         # 청크 단위로 로드
         train_chunks = []
@@ -60,8 +60,16 @@ class DataProcessor:
             
         except Exception as e:
             print(f"청크 로드 실패, 일반 로드 시도: {e}")
-            train_df = pd.read_csv(Config.TRAIN_FILE, dtype=dtypes)
-            test_df = pd.read_csv(Config.TEST_FILE, dtype=dtypes)
+            # 일반 로드 시에도 dtype에서 ID 컬럼 제외
+            train_df = pd.read_csv(Config.TRAIN_FILE)
+            test_df = pd.read_csv(Config.TEST_FILE)
+            
+            # 수동으로 데이터 타입 지정
+            for col in self.feature_columns:
+                if col in train_df.columns:
+                    train_df[col] = train_df[col].astype('float32')
+                if col in test_df.columns:
+                    test_df[col] = test_df[col].astype('float32')
             
             if Config.TARGET_COLUMN in train_df.columns:
                 train_df[Config.TARGET_COLUMN] = train_df[Config.TARGET_COLUMN].astype('int16')
