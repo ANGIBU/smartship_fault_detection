@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import pickle
 import joblib
-from sklearn.metrics import f1_score, classification_report, confusion_matrix, accuracy_score, precision_recall_fscore_support
+from sklearn.metrics import f1_score, classification_report, accuracy_score, precision_recall_fscore_support
 from sklearn.model_selection import StratifiedKFold
 from sklearn.utils.class_weight import compute_class_weight
 from collections import Counter
@@ -162,7 +162,7 @@ def print_classification_metrics(y_true, y_pred, class_names=None, target_names=
     """분류 성능 메트릭 출력"""
     metrics = calculate_all_metrics(y_true, y_pred)
     
-    print("=== 분류 성능 메트릭 ===")
+    print("분류 성능 메트릭")
     for metric_name, value in metrics.items():
         print(f"{metric_name:20s}: {value:.4f}")
     
@@ -186,28 +186,6 @@ def print_classification_metrics(y_true, y_pred, class_names=None, target_names=
     
     return metrics['macro_f1']
 
-def print_confusion_matrix(y_true, y_pred, class_names=None):
-    """혼동 행렬 출력"""
-    if class_names is None:
-        class_names = sorted(list(set(y_true) | set(y_pred)))
-    
-    cm = confusion_matrix(y_true, y_pred, labels=class_names)
-    
-    print("혼동 행렬:")
-    
-    # 헤더 출력
-    header = "실제\\예측 " + " ".join([f"{str(c):>6}" for c in class_names[:min(15, len(class_names))]])
-    print(header)
-    
-    # 각 행 출력 (최대 15개 클래스만)
-    for i, true_class in enumerate(class_names[:min(15, len(class_names))]):
-        row_data = cm[i][:min(15, len(class_names))]
-        row = f"{str(true_class):>8} " + " ".join([f"{val:>6}" for val in row_data])
-        print(row)
-    
-    if len(class_names) > 15:
-        print(f"... (총 {len(class_names)}개 클래스 중 상위 15개만 표시)")
-
 def create_cv_folds(X, y, n_splits=5, random_state=42):
     """교차 검증 폴드 생성"""
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
@@ -225,13 +203,6 @@ def calculate_class_weights(y, method='balanced'):
         weights = {}
         for class_label, count in class_counts.items():
             weights[class_label] = total_samples / (len(class_counts) * count)
-        return weights
-    elif method == 'sqrt_inverse_freq':
-        class_counts = Counter(y)
-        total_samples = len(y)
-        weights = {}
-        for class_label, count in class_counts.items():
-            weights[class_label] = np.sqrt(total_samples / count)
         return weights
     else:
         return None
@@ -256,7 +227,7 @@ def timer(func):
 
 def check_data_quality(df, feature_columns):
     """데이터 품질 검사"""
-    print("=== 데이터 품질 검사 ===")
+    print("데이터 품질 검사")
     print(f"데이터 형태: {df.shape}")
     
     # 결측치 확인
@@ -265,9 +236,9 @@ def check_data_quality(df, feature_columns):
     print(f"총 결측치 개수: {total_missing}")
     
     if total_missing > 0:
-        print("결측치가 있는 컬럼 (상위 10개):")
+        print("결측치가 있는 컬럼 (상위 5개):")
         missing_cols = missing_info[missing_info > 0].sort_values(ascending=False)
-        for col in missing_cols.head(10).index:
+        for col in missing_cols.head(5).index:
             print(f"  {col}: {missing_info[col]}개 ({missing_info[col]/len(df)*100:.2f}%)")
     
     # 무한값 확인
@@ -284,9 +255,9 @@ def check_data_quality(df, feature_columns):
     print(f"무한값 개수: {total_inf}")
     
     if total_inf > 0:
-        print("무한값이 있는 컬럼 (상위 10개):")
+        print("무한값이 있는 컬럼 (상위 5개):")
         sorted_inf = sorted(inf_counts.items(), key=lambda x: x[1], reverse=True)
-        for col, count in sorted_inf[:10]:
+        for col, count in sorted_inf[:5]:
             print(f"  {col}: {count}개 ({count/len(df)*100:.2f}%)")
     
     # 데이터 타입 확인
@@ -319,46 +290,6 @@ def memory_usage_check():
     except Exception:
         return 0
 
-def optimize_memory_usage(df):
-    """메모리 사용량 최적화"""
-    initial_memory = df.memory_usage(deep=True).sum() / 1024**2
-    
-    # 수치형 컬럼 최적화
-    for col in df.select_dtypes(include=['int64']).columns:
-        col_min = df[col].min()
-        col_max = df[col].max()
-        
-        if col_min >= 0:
-            if col_max < 255:
-                df[col] = df[col].astype(np.uint8)
-            elif col_max < 65535:
-                df[col] = df[col].astype(np.uint16)
-            elif col_max < 4294967295:
-                df[col] = df[col].astype(np.uint32)
-        else:
-            if col_min > np.iinfo(np.int8).min and col_max < np.iinfo(np.int8).max:
-                df[col] = df[col].astype(np.int8)
-            elif col_min > np.iinfo(np.int16).min and col_max < np.iinfo(np.int16).max:
-                df[col] = df[col].astype(np.int16)
-            elif col_min > np.iinfo(np.int32).min and col_max < np.iinfo(np.int32).max:
-                df[col] = df[col].astype(np.int32)
-    
-    for col in df.select_dtypes(include=['float64']).columns:
-        df[col] = pd.to_numeric(df[col], downcast='float')
-    
-    # 문자열 컬럼 최적화
-    for col in df.select_dtypes(include=['object']).columns:
-        if df[col].nunique() / len(df) < 0.5:
-            df[col] = df[col].astype('category')
-    
-    final_memory = df.memory_usage(deep=True).sum() / 1024**2
-    savings = (initial_memory - final_memory) / initial_memory * 100
-    
-    print(f"메모리 최적화: {initial_memory:.2f}MB -> {final_memory:.2f}MB "
-          f"({savings:.1f}% 절약)")
-    
-    return df
-
 def save_results(results, file_path):
     """결과를 CSV 파일로 저장"""
     try:
@@ -381,7 +312,7 @@ def save_results(results, file_path):
 
 def validate_predictions(y_pred, n_classes, sample_ids=None):
     """예측 결과 검증"""
-    print("=== 예측 결과 검증 ===")
+    print("예측 결과 검증")
     
     if sample_ids is not None:
         print(f"샘플 개수: {len(sample_ids)}")
@@ -436,16 +367,6 @@ def validate_predictions(y_pred, n_classes, sample_ids=None):
             print(f"누락된 클래스: {missing_list[:10]} ... (총 {len(missing_list)}개)")
         is_valid = False
     
-    # 분포 균형도 확인
-    expected_count = len(y_pred) / n_classes
-    max_deviation = max(abs(count - expected_count) for count in counts)
-    balance_score = 1 - (max_deviation / expected_count)
-    
-    print(f"분포 균형도: {balance_score:.3f} (1.0이 완전 균형)")
-    
-    if balance_score < 0.7:
-        print("경고: 클래스 분포가 심각하게 불균형합니다.")
-    
     return is_valid
 
 def create_submission_template(test_ids, predictions, id_col='ID', target_col='target'):
@@ -462,7 +383,7 @@ def create_submission_template(test_ids, predictions, id_col='ID', target_col='t
 
 def analyze_class_distribution(y, class_names=None):
     """클래스 분포 분석"""
-    print("=== 클래스 분포 분석 ===")
+    print("클래스 분포 분석")
     
     unique, counts = np.unique(y, return_counts=True)
     total_samples = len(y)
@@ -484,7 +405,8 @@ def analyze_class_distribution(y, class_names=None):
             'percentage': percentage
         })
         
-        print(f"  {class_name:>12}: {count:5d}개 ({percentage:5.2f}%)")
+        if class_id < 10:  # 상위 10개만 출력
+            print(f"  {class_name:>12}: {count:5d}개 ({percentage:5.2f}%)")
     
     # 불균형 정도 계산
     max_count = max(counts)
@@ -496,49 +418,8 @@ def analyze_class_distribution(y, class_names=None):
     print(f"  최소 클래스 크기: {min_count}")
     print(f"  불균형 비율: {imbalance_ratio:.2f}:1")
     print(f"  표준편차: {np.std(counts):.2f}")
-    print(f"  변동계수: {np.std(counts) / np.mean(counts):.3f}")
     
     return distribution_data
-
-def calculate_ensemble_weights(scores_dict, method='performance'):
-    """앙상블 가중치 계산"""
-    if not scores_dict:
-        return {}
-    
-    if method == 'performance':
-        # 성능 기반 가중치
-        total_score = sum(scores_dict.values())
-        if total_score == 0:
-            # 균등 가중치
-            return {name: 1.0/len(scores_dict) for name in scores_dict.keys()}
-        else:
-            return {name: score/total_score for name, score in scores_dict.items()}
-    
-    elif method == 'rank':
-        # 순위 기반 가중치
-        sorted_scores = sorted(scores_dict.items(), key=lambda x: x[1], reverse=True)
-        weights = {}
-        total_weight = 0
-        
-        for i, (name, score) in enumerate(sorted_scores):
-            weight = len(sorted_scores) - i
-            weights[name] = weight
-            total_weight += weight
-        
-        # 정규화
-        return {name: weight/total_weight for name, weight in weights.items()}
-    
-    elif method == 'softmax':
-        # 소프트맥스 가중치
-        scores = np.array(list(scores_dict.values()))
-        exp_scores = np.exp(scores - np.max(scores))
-        softmax_weights = exp_scores / np.sum(exp_scores)
-        
-        return dict(zip(scores_dict.keys(), softmax_weights))
-    
-    else:
-        # 균등 가중치
-        return {name: 1.0/len(scores_dict) for name in scores_dict.keys()}
 
 def garbage_collect():
     """가비지 컬렉션 수행"""
@@ -560,48 +441,6 @@ def format_time(seconds):
         remaining_minutes = int((seconds % 3600) // 60)
         remaining_seconds = seconds % 60
         return f"{hours}시간 {remaining_minutes}분 {remaining_seconds:.2f}초"
-
-def print_system_info():
-    """시스템 정보 출력"""
-    try:
-        import platform
-        
-        print("=== 시스템 정보 ===")
-        print(f"운영체제: {platform.system()} {platform.release()}")
-        print(f"프로세서: {platform.processor()}")
-        print(f"파이썬 버전: {platform.python_version()}")
-        
-        # 메모리 정보
-        memory = psutil.virtual_memory()
-        print(f"총 메모리: {memory.total / (1024**3):.2f} GB")
-        print(f"사용 가능 메모리: {memory.available / (1024**3):.2f} GB")
-        print(f"메모리 사용률: {memory.percent:.1f}%")
-        
-        # CPU 정보
-        cpu_count = psutil.cpu_count()
-        cpu_count_logical = psutil.cpu_count(logical=True)
-        print(f"CPU 코어 수: {cpu_count} (논리: {cpu_count_logical})")
-        
-    except Exception as e:
-        print(f"시스템 정보 조회 실패: {e}")
-
-def check_package_versions():
-    """주요 패키지 버전 확인"""
-    packages = [
-        'pandas', 'numpy', 'scikit-learn', 
-        'lightgbm', 'xgboost', 'scipy'
-    ]
-    
-    print("=== 패키지 버전 ===")
-    for package in packages:
-        try:
-            module = __import__(package)
-            version = getattr(module, '__version__', 'Unknown')
-            print(f"{package}: {version}")
-        except ImportError:
-            print(f"{package}: 설치되지 않음")
-        except Exception as e:
-            print(f"{package}: 버전 확인 실패 ({e})")
 
 def safe_divide(numerator, denominator, default=0.0):
     """안전한 나눗셈"""

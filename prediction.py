@@ -3,7 +3,6 @@
 import pandas as pd
 import numpy as np
 from sklearn.metrics import f1_score
-from sklearn.calibration import CalibratedClassifierCV
 from scipy import stats
 from scipy.special import softmax
 import warnings
@@ -17,7 +16,6 @@ class Prediction:
         self.model = model
         self.predictions = None
         self.prediction_probabilities = None
-        self.ensemble_models = {}
         self.prediction_history = []
         self.class_distributions = None
         
@@ -33,18 +31,13 @@ class Prediction:
             print(f"모델 로드 실패: {e}")
             raise
     
-    def load_ensemble_models(self, model_dict):
-        """앙상블 모델들 로드"""
-        self.ensemble_models = model_dict
-        print(f"앙상블 모델 로드 완료: {len(self.ensemble_models)}개")
-    
     @timer
     def predict(self, X_test, return_probabilities=True):
-        """단일 모델 예측"""
+        """모델 예측"""
         if self.model is None:
             raise ValueError("모델이 로드되지 않았습니다.")
         
-        print("=== 단일 모델 예측 수행 중 ===")
+        print("모델 예측 수행 중")
         
         # 예측 확률
         if hasattr(self.model, 'predict_proba') and return_probabilities:
@@ -77,314 +70,36 @@ class Prediction:
             # 다중 분류의 경우 소프트맥스 적용
             return softmax(scores, axis=1)
     
-    @timer
-    def predict_with_ensemble(self, models_dict, X_test, method='weighted_average', weights=None):
-        """앙상블 예측"""
-        print("=== 앙상블 예측 수행 중 ===")
-        print(f"사용 모델 수: {len(models_dict)}")
-        print(f"앙상블 방법: {method}")
-        
-        # 모델별 예측 수집
-        model_predictions = {}
-        model_probabilities = {}
-        
-        for name, model in models_dict.items():
-            print(f"{name} 예측 중...")
-            
-            try:
-                # 예측 수행
-                pred = model.predict(X_test)
-                model_predictions[name] = pred
-                
-                # 확률 수집
-                if hasattr(model, 'predict_proba'):
-                    prob = model.predict_proba(X_test)
-                elif hasattr(model, 'decision_function'):
-                    decision_scores = model.decision_function(X_test)
-                    prob = self._convert_to_probabilities(decision_scores)
-                else:
-                    # 원핫 인코딩으로 확률 근사
-                    prob = np.zeros((len(pred), Config.N_CLASSES))
-                    for i, p in enumerate(pred):
-                        prob[i, p] = 1.0
-                
-                model_probabilities[name] = prob
-                    
-            except Exception as e:
-                print(f"{name} 예측 실패: {e}")
-                continue
-        
-        if not model_probabilities:
-            raise ValueError("유효한 예측이 없습니다.")
-        
-        # 가중치 설정
-        if weights is None:
-            weights = {name: 1.0 for name in model_probabilities.keys()}
-        
-        # 앙상블 방법별 처리
-        if method == 'weighted_average':
-            ensemble_probabilities = self._weighted_average_ensemble(
-                model_probabilities, weights
-            )
-        elif method == 'rank_average':
-            ensemble_probabilities = self._rank_average_ensemble(
-                model_probabilities, weights
-            )
-        elif method == 'geometric_mean':
-            ensemble_probabilities = self._geometric_mean_ensemble(
-                model_probabilities, weights
-            )
-        elif method == 'bayesian_average':
-            ensemble_probabilities = self._bayesian_average_ensemble(
-                model_probabilities, weights
-            )
-        elif method == 'majority_vote':
-            ensemble_predictions = self._majority_vote_ensemble(
-                model_predictions, weights
-            )
-            self.predictions = ensemble_predictions
-            validate_predictions(self.predictions, Config.N_CLASSES)
-            return self.predictions
-        elif method == 'dynamic_weighting':
-            ensemble_probabilities = self._dynamic_weighted_ensemble(
-                model_probabilities, X_test
-            )
-        else:
-            # 기본값: 가중 평균
-            ensemble_probabilities = self._weighted_average_ensemble(
-                model_probabilities, weights
-            )
-        
-        # 최종 예측
-        ensemble_predictions = np.argmax(ensemble_probabilities, axis=1)
-        
-        self.prediction_probabilities = ensemble_probabilities
-        self.predictions = ensemble_predictions
-        
-        print(f"앙상블 예측 완료: {len(self.predictions)}개 샘플")
-        
-        # 예측 결과 검증
-        validate_predictions(self.predictions, Config.N_CLASSES)
-        
-        return self.predictions
-    
-    def _weighted_average_ensemble(self, model_probabilities, weights):
-        """가중 평균 앙상블"""
-        weighted_probs = []
-        total_weight = sum(weights.values())
-        
-        for name, prob in model_probabilities.items():
-            weight = weights.get(name, 1.0) / total_weight
-            weighted_probs.append(prob * weight)
-        
-        return np.sum(weighted_probs, axis=0)
-    
-    def _rank_average_ensemble(self, model_probabilities, weights):
-        """랭크 평균 앙상블"""
-        ranked_probs = []
-        
-        for name, prob in model_probabilities.items():
-            # 각 샘플에 대해 확률을 랭크로 변환
-            ranked_prob = np.zeros_like(prob)
-            for i in range(prob.shape[0]):
-                ranks = stats.rankdata(prob[i])
-                ranked_prob[i] = ranks / ranks.sum()
-            
-            weight = weights.get(name, 1.0)
-            ranked_probs.append(ranked_prob * weight)
-        
-        total_weight = sum(weights.values())
-        return np.sum(ranked_probs, axis=0) / total_weight
-    
-    def _geometric_mean_ensemble(self, model_probabilities, weights):
-        """기하 평균 앙상블"""
-        log_probs = []
-        
-        for name, prob in model_probabilities.items():
-            # 로그 확률 계산 (0 방지를 위해 작은 값 추가)
-            log_prob = np.log(prob + 1e-15)
-            weight = weights.get(name, 1.0)
-            log_probs.append(log_prob * weight)
-        
-        total_weight = sum(weights.values())
-        avg_log_prob = np.sum(log_probs, axis=0) / total_weight
-        
-        # 지수 변환으로 확률 복구
-        ensemble_prob = np.exp(avg_log_prob)
-        
-        # 정규화
-        return ensemble_prob / ensemble_prob.sum(axis=1, keepdims=True)
-    
-    def _bayesian_average_ensemble(self, model_probabilities, weights):
-        """베이지안 평균 앙상블"""
-        # 각 모델의 신뢰도를 가중치로 사용
-        confidence_weights = {}
-        
-        for name, prob in model_probabilities.items():
-            # 각 예측의 최대 확률을 신뢰도로 사용
-            confidence = np.mean(np.max(prob, axis=1))
-            confidence_weights[name] = confidence * weights.get(name, 1.0)
-        
-        return self._weighted_average_ensemble(model_probabilities, confidence_weights)
-    
-    def _dynamic_weighted_ensemble(self, model_probabilities, X_test):
-        """동적 가중치 앙상블"""
-        ensemble_probs = []
-        
-        for i in range(len(X_test)):
-            sample_weights = {}
-            
-            # 각 모델의 예측 확률을 기반으로 가중치 계산
-            for name, prob in model_probabilities.items():
-                sample_prob = prob[i]
-                # 최대 확률과 엔트로피를 기반으로 가중치 계산
-                max_prob = np.max(sample_prob)
-                entropy = -np.sum(sample_prob * np.log(sample_prob + 1e-15))
-                
-                # 높은 신뢰도와 낮은 엔트로피에 더 높은 가중치
-                weight = max_prob * (1.0 / (entropy + 1e-8))
-                sample_weights[name] = weight
-            
-            # 가중 평균 계산
-            weighted_prob = np.zeros(Config.N_CLASSES)
-            total_weight = sum(sample_weights.values())
-            
-            for name, prob in model_probabilities.items():
-                weight = sample_weights[name] / total_weight
-                weighted_prob += prob[i] * weight
-            
-            ensemble_probs.append(weighted_prob)
-        
-        return np.array(ensemble_probs)
-    
-    def _majority_vote_ensemble(self, model_predictions, weights):
-        """다수결 투표 앙상블"""
-        n_samples = len(next(iter(model_predictions.values())))
-        ensemble_predictions = np.zeros(n_samples, dtype=int)
-        
-        for i in range(n_samples):
-            votes = {}
-            
-            for name, pred in model_predictions.items():
-                vote = pred[i]
-                weight = weights.get(name, 1.0)
-                votes[vote] = votes.get(vote, 0) + weight
-            
-            # 최다 득표 클래스 선택
-            ensemble_predictions[i] = max(votes.keys(), key=votes.get)
-        
-        return ensemble_predictions
-    
-    @timer
-    def calibrate_probabilities(self, X_val, y_val, method='isotonic'):
-        """확률 보정"""
-        if self.model is None:
-            raise ValueError("모델이 로드되지 않았습니다.")
-        
-        print(f"=== 확률 보정 시작 ({method}) ===")
-        
-        try:
-            # 보정된 모델 생성
-            calibrated_model = CalibratedClassifierCV(
-                base_estimator=self.model,
-                method=method,
-                cv='prefit'
-            )
-            
-            calibrated_model.fit(X_val, y_val)
-            self.model = calibrated_model
-            
-            print("확률 보정 완료")
-            return calibrated_model
-            
-        except Exception as e:
-            print(f"확률 보정 실패: {e}")
-            return None
-    
-    def confidence_filtering(self, confidence_threshold=0.8):
-        """신뢰도 기반 예측 필터링"""
-        if self.prediction_probabilities is None:
-            print("확률 정보가 없어 신뢰도 필터링을 수행할 수 없습니다.")
-            return self.predictions
-        
-        print(f"=== 신뢰도 필터링 시작 (임계값: {confidence_threshold}) ===")
-        
-        max_probs = np.max(self.prediction_probabilities, axis=1)
-        high_confidence_mask = max_probs >= confidence_threshold
-        
-        high_conf_count = np.sum(high_confidence_mask)
-        low_conf_count = len(max_probs) - high_conf_count
-        
-        print(f"고신뢰도 예측: {high_conf_count}개 ({high_conf_count/len(max_probs)*100:.1f}%)")
-        print(f"저신뢰도 예측: {low_conf_count}개 ({low_conf_count/len(max_probs)*100:.1f}%)")
-        
-        # 저신뢰도 예측에 대한 처리
-        if low_conf_count > 0:
-            filtered_predictions = self.predictions.copy()
-            
-            # 저신뢰도 예측 인덱스
-            low_conf_indices = np.where(~high_confidence_mask)[0]
-            
-            for idx in low_conf_indices:
-                # 상위 2개 확률 클래스 고려
-                prob_order = np.argsort(self.prediction_probabilities[idx])[::-1]
-                top2_classes = prob_order[:2]
-                
-                # 두 번째 클래스와의 차이가 작으면 더 안전한 선택
-                prob_diff = (self.prediction_probabilities[idx, top2_classes[0]] - 
-                           self.prediction_probabilities[idx, top2_classes[1]])
-                
-                if prob_diff < 0.1:
-                    # 차이가 작으면 클래스 빈도를 고려하여 선택
-                    if self.class_distributions is not None:
-                        class1_freq = self.class_distributions.get(top2_classes[0], 1)
-                        class2_freq = self.class_distributions.get(top2_classes[1], 1)
-                        
-                        # 더 빈번한 클래스 선택
-                        if class2_freq > class1_freq:
-                            filtered_predictions[idx] = top2_classes[1]
-                else:
-                    filtered_predictions[idx] = top2_classes[0]
-            
-            self.predictions = filtered_predictions
-            print("저신뢰도 예측 보정 완료")
-        
-        return self.predictions
-    
-    def balance_predictions(self, target_distribution=None, method='probability_based'):
+    def balance_predictions(self, target_distribution=None, method='simple'):
         """예측 분포 균형 조정"""
         if self.predictions is None:
             print("예측이 수행되지 않아 균형 조정 불가")
             return self.predictions
         
-        print(f"=== 예측 분포 균형 조정 시작 ({method}) ===")
+        print(f"예측 분포 균형 조정 시작 ({method})")
         
         # 현재 예측 분포 분석
         current_counts = np.bincount(self.predictions, minlength=Config.N_CLASSES)
         total_samples = len(self.predictions)
         
-        # 목표 분포 설정 (더 정교한 방식)
+        # 목표 분포 설정
         if target_distribution is None:
-            # 이상적인 균등 분포 대신 약간의 변동성 허용
+            # 균등 분포 목표
             base_count = total_samples // Config.N_CLASSES
             remainder = total_samples % Config.N_CLASSES
             
             target_distribution = np.full(Config.N_CLASSES, base_count)
             
-            # 나머지를 랜덤하게 분배하되, 클래스 0-10에 우선순위
+            # 나머지를 랜덤하게 분배
             indices = np.random.RandomState(Config.RANDOM_STATE).choice(
-                min(remainder + 5, Config.N_CLASSES), remainder, replace=False
+                Config.N_CLASSES, remainder, replace=False
             )
             target_distribution[indices] += 1
         
-        print(f"목표 분포: 평균 {np.mean(target_distribution):.0f}개 (범위: {np.min(target_distribution)}-{np.max(target_distribution)})")
+        print(f"목표 분포: 평균 {np.mean(target_distribution):.0f}개")
         
         if method == 'probability_based' and self.prediction_probabilities is not None:
             balanced_predictions = self._probability_based_balancing(
-                current_counts, target_distribution
-            )
-        elif method == 'confidence_based' and self.prediction_probabilities is not None:
-            balanced_predictions = self._confidence_based_balancing(
                 current_counts, target_distribution
             )
         else:
@@ -397,7 +112,7 @@ class Prediction:
         # 균형 조정 결과 확인
         new_counts = np.bincount(self.predictions, minlength=Config.N_CLASSES)
         print("균형 조정 결과:")
-        for i in range(Config.N_CLASSES):
+        for i in range(min(10, Config.N_CLASSES)):
             old_count = current_counts[i]
             new_count = new_counts[i]
             target_count = target_distribution[i]
@@ -451,35 +166,8 @@ class Prediction:
                         target_prob = self.prediction_probabilities[idx, class_id]
                         
                         # 확률 차이가 크지 않은 경우에만 재할당
-                        if target_prob > 0.2 and (original_prob - target_prob) < 0.3:
+                        if target_prob > 0.15 and (original_prob - target_prob) < 0.4:
                             balanced_predictions[idx] = class_id
-        
-        return balanced_predictions
-    
-    def _confidence_based_balancing(self, current_counts, target_distribution):
-        """신뢰도 기반 균형 조정"""
-        balanced_predictions = self.predictions.copy()
-        confidence_scores = np.max(self.prediction_probabilities, axis=1)
-        
-        for class_id in range(Config.N_CLASSES):
-            current_count = current_counts[class_id]
-            target_count = target_distribution[class_id]
-            
-            if current_count > target_count:
-                # 낮은 신뢰도 예측 제거
-                class_indices = np.where(balanced_predictions == class_id)[0]
-                class_confidences = confidence_scores[class_indices]
-                
-                remove_count = current_count - target_count
-                low_conf_indices = class_indices[np.argsort(class_confidences)[:remove_count]]
-                
-                # 재할당
-                for idx in low_conf_indices:
-                    prob_order = np.argsort(self.prediction_probabilities[idx])[::-1]
-                    for next_class in prob_order[1:]:
-                        if next_class != class_id:
-                            balanced_predictions[idx] = next_class
-                            break
         
         return balanced_predictions
     
@@ -517,14 +205,14 @@ class Prediction:
             print("예측이 수행되지 않았습니다.")
             return None
         
-        print("=== 예측 분포 분석 ===")
+        print("예측 분포 분석")
         
         unique, counts = np.unique(self.predictions, return_counts=True)
         distribution = dict(zip(unique, counts))
         
         print("클래스별 예측 개수:")
         total_predictions = len(self.predictions)
-        for class_id in range(Config.N_CLASSES):
+        for class_id in range(min(10, Config.N_CLASSES)):
             count = distribution.get(class_id, 0)
             percentage = (count / total_predictions) * 100
             print(f"클래스 {class_id:2d}: {count:4d}개 ({percentage:5.2f}%)")
@@ -536,7 +224,6 @@ class Prediction:
         print(f"\n총 예측 개수: {total_predictions}")
         print(f"클래스당 기대 개수: {expected_per_class:.1f}")
         print(f"실제 분포 표준편차: {np.std(actual_counts):.2f}")
-        print(f"분포 변동계수: {np.std(actual_counts) / np.mean(actual_counts):.3f}")
         
         # 불균형 정도 계산
         imbalance_scores = []
@@ -555,19 +242,7 @@ class Prediction:
         print(f"평균 불균형 정도: {avg_imbalance:.3f}")
         
         if missing_classes:
-            print(f"경고: 예측되지 않은 클래스: {missing_classes}")
-        
-        # 성능 예측
-        if avg_imbalance < 0.1:
-            balance_status = "매우 균형적"
-        elif avg_imbalance < 0.15:
-            balance_status = "균형적"
-        elif avg_imbalance < 0.25:
-            balance_status = "약간 불균형"
-        else:
-            balance_status = "심각한 불균형 - 균형 조정 필요"
-        
-        print(f"분포 상태: {balance_status}")
+            print(f"누락된 클래스: {missing_classes}")
         
         # 클래스 분포 저장
         self.class_distributions = distribution
@@ -579,8 +254,7 @@ class Prediction:
             'avg_imbalance': avg_imbalance,
             'missing_classes': missing_classes,
             'balance_status': 'good' if avg_imbalance < 0.2 else 'poor',
-            'std': np.std(actual_counts),
-            'cv': np.std(actual_counts) / np.mean(actual_counts)
+            'std': np.std(actual_counts)
         }
     
     @timer
@@ -595,11 +269,11 @@ class Prediction:
         if output_path is None:
             output_path = Config.RESULT_FILE
         
-        print("=== 제출 파일 생성 중 ===")
+        print("제출 파일 생성 중")
         
         # 균형 조정 적용
         if apply_balancing:
-            print("예측 분포 균형 조정 적용 중...")
+            print("예측 분포 균형 조정 적용 중")
             if self.prediction_probabilities is not None:
                 predictions = self.balance_predictions(method='probability_based')
             else:
@@ -622,8 +296,6 @@ class Prediction:
         # 중복 ID 확인
         if submission_df[Config.ID_COLUMN].duplicated().any():
             print("경고: 중복된 ID가 발견되었습니다.")
-            duplicated_ids = submission_df[submission_df[Config.ID_COLUMN].duplicated()][Config.ID_COLUMN].values
-            print(f"중복 ID 개수: {len(duplicated_ids)}")
         
         # 예측값 범위 확인
         invalid_predictions = (submission_df[Config.TARGET_COLUMN] < 0) | (submission_df[Config.TARGET_COLUMN] >= Config.N_CLASSES)
@@ -676,7 +348,7 @@ class Prediction:
             print("예측이 수행되지 않았습니다.")
             return None
         
-        print("=== 예측 결과 검증 ===")
+        print("예측 결과 검증")
         
         # 기본 검증
         print(f"예측 개수: {len(self.predictions)}")
@@ -719,7 +391,8 @@ class Prediction:
                         'support': np.sum(class_mask)
                     })
                     
-                    print(f"클래스 {class_id:2d} - 정확도: {accuracy:.4f}, F1: {f1:.4f}, 지원: {np.sum(class_mask):4d}")
+                    if class_id < 10:  # 상위 10개 클래스만 출력
+                        print(f"클래스 {class_id:2d} - 정확도: {accuracy:.4f}, F1: {f1:.4f}, 지원: {np.sum(class_mask):4d}")
             
             avg_accuracy = np.mean([m['accuracy'] for m in class_metrics])
             avg_f1 = np.mean([m['f1'] for m in class_metrics])
@@ -728,10 +401,10 @@ class Prediction:
             print(f"평균 클래스별 F1: {avg_f1:.4f}")
             
             # 성능이 낮은 클래스 식별
-            low_performance_classes = [m for m in class_metrics if m['f1'] < 0.6]
+            low_performance_classes = [m for m in class_metrics if m['f1'] < 0.5]
             if low_performance_classes:
                 print(f"\n성능이 낮은 클래스 ({len(low_performance_classes)}개):")
-                for m in low_performance_classes:
+                for m in low_performance_classes[:5]:  # 상위 5개만
                     print(f"  클래스 {m['class']:2d}: F1={m['f1']:.3f}, 지원={m['support']:4d}")
             
             return {
@@ -743,21 +416,3 @@ class Prediction:
             }
         
         return None
-    
-    def get_prediction_summary(self):
-        """예측 요약 정보 반환"""
-        if not self.prediction_history:
-            return None
-        
-        latest_prediction = self.prediction_history[-1]
-        
-        summary = {
-            'total_predictions': len(self.predictions) if self.predictions is not None else 0,
-            'prediction_methods': len(self.prediction_history),
-            'latest_distribution': latest_prediction['distribution'].tolist(),
-            'latest_timestamp': latest_prediction['timestamp'],
-            'has_probabilities': self.prediction_probabilities is not None,
-            'balance_quality': self.analyze_prediction_distribution() if self.predictions is not None else None
-        }
-        
-        return summary
