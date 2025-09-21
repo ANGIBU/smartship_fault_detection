@@ -480,5 +480,5 @@ if __name__ == "__main__":
             print("  python main.py         # 전체 실행")
             print("  python main.py stable  # 안정적인 실행")
             print("  python main.py fast    # 빠른 실행")
+    else:
         main()
-    else:a
