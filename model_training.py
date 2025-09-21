@@ -2,8 +2,8 @@
 
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier, GradientBoostingClassifier
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier, GradientBoostingClassifier, ExtraTreesClassifier
+from sklearn.model_selection import StratifiedKFold, cross_val_score, TimeSeriesSplit
 from sklearn.metrics import f1_score, make_scorer
 from sklearn.utils.class_weight import compute_class_weight
 import lightgbm as lgb
@@ -24,12 +24,18 @@ class ModelTraining:
         self.best_model = None
         self.best_score = 0
         self.cv_scores = {}
+        self.ensemble_models = {}
         self.logger = setup_logging()
         self.scorer = make_scorer(f1_score, average='macro')
         
-    def _create_cv_strategy(self, X, y):
+    def _create_cv_strategy(self, X, y, strategy='stratified'):
         """교차 검증 전략 생성"""
-        return StratifiedKFold(n_splits=Config.CV_FOLDS, shuffle=True, random_state=Config.RANDOM_STATE)
+        if strategy == 'stratified':
+            return StratifiedKFold(n_splits=Config.CV_FOLDS, shuffle=True, random_state=Config.RANDOM_STATE)
+        elif strategy == 'time_series':
+            return TimeSeriesSplit(n_splits=Config.CV_FOLDS)
+        else:
+            return StratifiedKFold(n_splits=Config.CV_FOLDS, shuffle=True, random_state=Config.RANDOM_STATE)
     
     @timer
     def train_lightgbm(self, X_train, y_train, X_val=None, y_val=None, params=None):
@@ -42,24 +48,16 @@ class ModelTraining:
             params = params.copy()
         
         try:
-            # 클래스 가중치를 파라미터에서 제거하고 별도 처리
             params.pop('class_weight', None)
             
-            # LightGBM에서 클래스 가중치 계산
+            # 클래스 가중치 계산
             classes = np.unique(y_train)
-            class_weights = compute_class_weight(
-                'balanced', 
-                classes=classes, 
-                y=y_train
-            )
+            class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
             class_weight_dict = dict(zip(classes, class_weights))
-            
-            # 샘플 가중치 계산
             sample_weights = np.array([class_weight_dict[y] for y in y_train])
             
             model = lgb.LGBMClassifier(**params)
             
-            # Early stopping 처리
             if X_val is not None and y_val is not None:
                 fit_params = {
                     'eval_set': [(X_val, y_val)],
@@ -70,14 +68,12 @@ class ModelTraining:
                     ],
                     'sample_weight': sample_weights
                 }
-                
                 model.fit(X_train, y_train, **fit_params)
             else:
                 model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['lightgbm'] = model
             self.logger.info("LightGBM 모델 훈련 완료")
-            
             return model
             
         except Exception as e:
@@ -98,20 +94,14 @@ class ModelTraining:
         try:
             # 클래스 가중치 계산
             classes = np.unique(y_train)
-            class_weights = compute_class_weight(
-                'balanced', 
-                classes=classes, 
-                y=y_train
-            )
+            class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
             class_weight_dict = dict(zip(classes, class_weights))
             sample_weights = np.array([class_weight_dict[y] for y in y_train])
             
             model = xgb.XGBClassifier(**params)
             
-            # XGBoost 버전 호환성 처리
             if X_val is not None and y_val is not None:
                 try:
-                    # XGBoost 2.0+ 방식
                     model.fit(
                         X_train, y_train, 
                         sample_weight=sample_weights,
@@ -122,7 +112,6 @@ class ModelTraining:
                 except (TypeError, ValueError) as e:
                     print(f"XGBoost 새 방식 실패, 이전 방식 시도: {e}")
                     try:
-                        # XGBoost 1.x 방식
                         model.fit(
                             X_train, y_train, 
                             sample_weight=sample_weights,
@@ -137,7 +126,6 @@ class ModelTraining:
             
             self.models['xgboost'] = model
             self.logger.info("XGBoost 모델 훈련 완료")
-            
             return model
             
         except Exception as e:
@@ -163,7 +151,6 @@ class ModelTraining:
                 
                 self.models['xgboost'] = model
                 self.logger.info("XGBoost 기본 설정으로 훈련 완료")
-                
                 return model
                 
             except Exception as e2:
@@ -180,15 +167,12 @@ class ModelTraining:
             params = Config.RF_PARAMS.copy()
         
         try:
-            # 클래스 가중치 적용
             params['class_weight'] = 'balanced'
-            
             model = RandomForestClassifier(**params)
             model.fit(X_train, y_train)
             
             self.models['random_forest'] = model
             self.logger.info("Random Forest 모델 훈련 완료")
-            
             return model
             
         except Exception as e:
@@ -197,19 +181,19 @@ class ModelTraining:
             return None
     
     @timer
-    def train_gradient_boosting(self, X_train, y_train):
+    def train_gradient_boosting(self, X_train, y_train, params=None):
         """Gradient Boosting 모델 훈련"""
         print("Gradient Boosting 모델 훈련 시작")
         
         try:
-            params = Config.GB_PARAMS.copy()
+            if params is None:
+                params = Config.GB_PARAMS.copy()
             
             model = GradientBoostingClassifier(**params)
             model.fit(X_train, y_train)
             
             self.models['gradient_boosting'] = model
             self.logger.info("Gradient Boosting 모델 훈련 완료")
-            
             return model
             
         except Exception as e:
@@ -218,7 +202,29 @@ class ModelTraining:
             return None
     
     @timer
-    def hyperparameter_optimization(self, X_train, y_train, model_type='lightgbm', n_trials=15):
+    def train_extra_trees(self, X_train, y_train, params=None):
+        """Extra Trees 모델 훈련"""
+        print("Extra Trees 모델 훈련 시작")
+        
+        try:
+            if params is None:
+                params = Config.ET_PARAMS.copy()
+            
+            params['class_weight'] = 'balanced'
+            model = ExtraTreesClassifier(**params)
+            model.fit(X_train, y_train)
+            
+            self.models['extra_trees'] = model
+            self.logger.info("Extra Trees 모델 훈련 완료")
+            return model
+            
+        except Exception as e:
+            print(f"Extra Trees 훈련 중 오류 발생: {e}")
+            self.logger.error(f"Extra Trees 훈련 실패: {e}")
+            return None
+    
+    @timer
+    def hyperparameter_optimization(self, X_train, y_train, model_type='lightgbm', n_trials=10):
         """하이퍼파라미터 튜닝"""
         print(f"{model_type} 하이퍼파라미터 튜닝 시작")
         
@@ -231,28 +237,23 @@ class ModelTraining:
                         'metric': 'multi_logloss',
                         'boosting_type': 'gbdt',
                         'is_unbalance': True,
-                        'num_leaves': trial.suggest_int('num_leaves', 31, 100),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.05, 0.15),
-                        'feature_fraction': trial.suggest_float('feature_fraction', 0.7, 0.9),
-                        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.7, 0.9),
+                        'num_leaves': trial.suggest_int('num_leaves', 15, 63),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.1),
+                        'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 0.8),
+                        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 0.8),
                         'bagging_freq': trial.suggest_int('bagging_freq', 3, 7),
-                        'min_child_samples': trial.suggest_int('min_child_samples', 5, 20),
-                        'reg_alpha': trial.suggest_float('reg_alpha', 0.001, 0.1),
-                        'reg_lambda': trial.suggest_float('reg_lambda', 0.001, 0.1),
-                        'max_depth': trial.suggest_int('max_depth', 6, 12),
+                        'min_child_samples': trial.suggest_int('min_child_samples', 10, 30),
+                        'reg_alpha': trial.suggest_float('reg_alpha', 0.05, 0.3),
+                        'reg_lambda': trial.suggest_float('reg_lambda', 0.05, 0.3),
+                        'max_depth': trial.suggest_int('max_depth', 4, 8),
                         'verbose': -1,
                         'random_state': Config.RANDOM_STATE,
-                        'n_estimators': trial.suggest_int('n_estimators', 300, 600),
+                        'n_estimators': trial.suggest_int('n_estimators', 200, 400),
                         'n_jobs': 1
                     }
                     
-                    # 클래스 가중치 계산
                     classes = np.unique(y_train)
-                    class_weights = compute_class_weight(
-                        'balanced', 
-                        classes=classes, 
-                        y=y_train
-                    )
+                    class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
                     class_weight_dict = dict(zip(classes, class_weights))
                     sample_weights = np.array([class_weight_dict[y] for y in y_train])
                     
@@ -262,28 +263,23 @@ class ModelTraining:
                     params = {
                         'objective': 'multi:softprob',
                         'num_class': Config.N_CLASSES,
-                        'learning_rate': trial.suggest_float('learning_rate', 0.05, 0.15),
-                        'max_depth': trial.suggest_int('max_depth', 4, 10),
-                        'subsample': trial.suggest_float('subsample', 0.7, 0.9),
-                        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 0.9),
-                        'reg_alpha': trial.suggest_float('reg_alpha', 0.001, 0.1),
-                        'reg_lambda': trial.suggest_float('reg_lambda', 0.001, 0.1),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.1),
+                        'max_depth': trial.suggest_int('max_depth', 3, 6),
+                        'subsample': trial.suggest_float('subsample', 0.6, 0.8),
+                        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.8),
+                        'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 0.4),
+                        'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 0.4),
                         'gamma': trial.suggest_float('gamma', 0, 0.3),
-                        'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+                        'min_child_weight': trial.suggest_int('min_child_weight', 5, 20),
                         'random_state': Config.RANDOM_STATE,
-                        'n_estimators': trial.suggest_int('n_estimators', 300, 600),
+                        'n_estimators': trial.suggest_int('n_estimators', 150, 300),
                         'n_jobs': 1,
                         'tree_method': 'hist',
                         'verbosity': 0
                     }
                     
-                    # 클래스 가중치 계산
                     classes = np.unique(y_train)
-                    class_weights = compute_class_weight(
-                        'balanced', 
-                        classes=classes, 
-                        y=y_train
-                    )
+                    class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
                     class_weight_dict = dict(zip(classes, class_weights))
                     sample_weights = np.array([class_weight_dict[y] for y in y_train])
                     
@@ -297,7 +293,6 @@ class ModelTraining:
                     X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
                     y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
                     
-                    # 가중치도 분할
                     if model_type in ['lightgbm', 'xgboost']:
                         sw_tr = sample_weights[train_idx]
                         model.fit(X_tr, y_tr, sample_weight=sw_tr)
@@ -316,7 +311,7 @@ class ModelTraining:
         
         # Optuna 설정
         sampler = TPESampler(seed=Config.RANDOM_STATE)
-        pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=3)
+        pruner = MedianPruner(n_startup_trials=3, n_warmup_steps=2)
         
         study = optuna.create_study(direction='maximize', sampler=sampler, pruner=pruner)
         study.optimize(objective, n_trials=n_trials, timeout=Config.OPTUNA_TIMEOUT, show_progress_bar=False)
@@ -327,107 +322,153 @@ class ModelTraining:
         return study.best_params, study.best_value
     
     @timer
-    def cross_validation(self, X_train, y_train):
-        """교차 검증 수행"""
-        print("교차 검증 시작")
+    def stable_cross_validation(self, X_train, y_train):
+        """안정적인 교차 검증 수행"""
+        print("안정적인 교차 검증 시작")
         
-        cv_strategy = self._create_cv_strategy(X_train, y_train)
+        # 시간 기반과 계층화 검증 모두 수행
+        strategies = {
+            'stratified': StratifiedKFold(n_splits=5, shuffle=True, random_state=Config.RANDOM_STATE),
+            'time_based': TimeSeriesSplit(n_splits=3)
+        }
         
         for model_name, model in self.models.items():
             if model is None:
                 print(f"{model_name} 건너뜀: 모델이 None")
                 continue
                 
-            print(f"{model_name} 교차 검증 중")
+            print(f"{model_name} 안정적인 교차 검증 중")
             
-            try:
-                # 단순 교차 검증 (가중치 없이)
-                cv_scores = cross_val_score(
-                    model, X_train, y_train, 
-                    cv=cv_strategy, scoring=self.scorer, n_jobs=1
-                )
+            model_scores = {}
+            
+            for strategy_name, cv_strategy in strategies.items():
+                try:
+                    cv_scores = cross_val_score(
+                        model, X_train, y_train, 
+                        cv=cv_strategy, scoring=self.scorer, n_jobs=1
+                    )
+                    
+                    model_scores[strategy_name] = {
+                        'scores': cv_scores,
+                        'mean': cv_scores.mean(),
+                        'std': cv_scores.std()
+                    }
+                    
+                    print(f"  {strategy_name}: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+                    
+                except Exception as e:
+                    print(f"  {strategy_name} 검증 실패: {e}")
+                    continue
+            
+            if model_scores:
+                # 안정성을 고려한 점수 계산 (표준편차 페널티 적용)
+                stability_scores = []
+                for strategy_scores in model_scores.values():
+                    mean_score = strategy_scores['mean']
+                    std_score = strategy_scores['std']
+                    # 표준편차가 클수록 페널티
+                    stability_score = mean_score - (std_score * 2)
+                    stability_scores.append(stability_score)
+                
+                final_score = np.mean(stability_scores)
+                overall_std = np.std([scores['mean'] for scores in model_scores.values()])
                 
                 self.cv_scores[model_name] = {
-                    'scores': cv_scores,
-                    'mean': cv_scores.mean(),
-                    'std': cv_scores.std()
+                    'scores': model_scores,
+                    'mean': final_score,
+                    'std': overall_std,
+                    'stability_score': final_score
                 }
                 
-                print(f"{model_name} CV 점수: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
-                
-            except Exception as e:
-                print(f"{model_name} 교차 검증 실패: {e}")
-                continue
+                print(f"{model_name} 최종 안정성 점수: {final_score:.4f}")
         
-        # 최고 성능 모델 선택
+        # 최고 성능 모델 선택 (안정성 고려)
         if self.cv_scores:
-            best_model_name = max(self.cv_scores.keys(), key=lambda x: self.cv_scores[x]['mean'])
+            best_model_name = max(self.cv_scores.keys(), key=lambda x: self.cv_scores[x]['stability_score'])
             if best_model_name in self.models and self.models[best_model_name] is not None:
                 self.best_model = self.models[best_model_name]
-                self.best_score = self.cv_scores[best_model_name]['mean']
+                self.best_score = self.cv_scores[best_model_name]['stability_score']
                 
-                print(f"최고 성능 모델: {best_model_name}")
-                print(f"최고 CV 점수: {self.best_score:.4f}")
+                print(f"최고 안정성 모델: {best_model_name}")
+                print(f"최고 안정성 점수: {self.best_score:.4f}")
         
-        # 메모리 정리
         gc.collect()
-        
         return self.cv_scores
     
     @timer
-    def create_voting_ensemble(self, X_train, y_train):
-        """보팅 앙상블 생성"""
-        print("보팅 앙상블 생성 시작")
+    def create_weighted_ensemble(self, X_train, y_train):
+        """가중치 기반 앙상블 생성"""
+        print("가중치 기반 앙상블 생성 시작")
         
         # 성능 기준 모델 선택
         good_models = []
+        model_weights = []
+        
         for name, model in self.models.items():
             if (model is not None and name in self.cv_scores and 
-                self.cv_scores[name]['mean'] >= Config.MIN_CV_SCORE):
+                self.cv_scores[name]['stability_score'] >= Config.MIN_CV_SCORE):
+                
+                score = self.cv_scores[name]['stability_score']
+                weight = score / sum(cv_info['stability_score'] for cv_info in self.cv_scores.values() 
+                                   if cv_info['stability_score'] >= Config.MIN_CV_SCORE)
+                
                 good_models.append((name, model))
-        
-        if len(good_models) < 2:
-            # 기준 완화하여 상위 모델 선택
-            if self.cv_scores:
-                sorted_models = sorted(self.cv_scores.items(), key=lambda x: x[1]['mean'], reverse=True)
-                good_models = []
-                for name, _ in sorted_models[:3]:
-                    if name in self.models and self.models[name] is not None:
-                        good_models.append((name, self.models[name]))
+                model_weights.append(weight)
+                
+                print(f"{name}: 점수 {score:.4f}, 가중치 {weight:.3f}")
         
         if len(good_models) >= 2:
-            print(f"보팅에 사용할 모델: {[name for name, _ in good_models]}")
+            print(f"앙상블에 사용할 모델: {[name for name, _ in good_models]}")
             
             try:
-                voting_ensemble = VotingClassifier(
+                # 가중치 기반 소프트 보팅
+                class WeightedVotingClassifier(VotingClassifier):
+                    def __init__(self, estimators, voting='soft', weights=None):
+                        super().__init__(estimators, voting=voting, weights=weights)
+                        self.model_weights = weights
+                    
+                    def predict_proba(self, X):
+                        if self.voting == 'hard':
+                            raise AttributeError("predict_proba is not available when voting='hard'")
+                        
+                        avg = np.average(self._collect_probas(X), axis=0, weights=self.model_weights)
+                        return avg
+                
+                weighted_ensemble = WeightedVotingClassifier(
                     estimators=good_models,
                     voting='soft',
-                    n_jobs=1
+                    weights=model_weights
                 )
                 
-                voting_ensemble.fit(X_train, y_train)
+                weighted_ensemble.fit(X_train, y_train)
                 
-                self.models['voting_ensemble'] = voting_ensemble
-                print("보팅 앙상블 생성 완료")
+                self.models['weighted_ensemble'] = weighted_ensemble
+                self.ensemble_models['weighted'] = weighted_ensemble
+                print("가중치 기반 앙상블 생성 완료")
                 
-                return voting_ensemble
+                return weighted_ensemble
+                
             except Exception as e:
-                print(f"소프트 보팅 실패: {e}")
+                print(f"가중치 앙상블 실패: {e}")
+                
+                # 기본 보팅 앙상블로 대체
                 try:
                     voting_ensemble = VotingClassifier(
                         estimators=good_models,
-                        voting='hard',
+                        voting='soft',
                         n_jobs=1
                     )
                     voting_ensemble.fit(X_train, y_train)
+                    
                     self.models['voting_ensemble'] = voting_ensemble
-                    print("하드 보팅 앙상블 생성 완료")
+                    print("기본 보팅 앙상블 생성 완료")
                     return voting_ensemble
+                    
                 except Exception as e2:
-                    print(f"하드 보팅도 실패: {e2}")
+                    print(f"기본 보팅도 실패: {e2}")
                     return None
         else:
-            print("보팅을 위한 충분한 모델이 없음")
+            print("앙상블을 위한 충분한 모델이 없음")
             return None
     
     @timer
@@ -437,7 +478,9 @@ class ModelTraining:
         
         # 기본 모델들 훈련
         if use_optimization:
-            print("LightGBM 하이퍼파라미터 튜닝 중")
+            print("하이퍼파라미터 튜닝 적용")
+            
+            # LightGBM 튜닝
             try:
                 best_params, _ = self.hyperparameter_optimization(
                     X_train, y_train, 'lightgbm', n_trials=Config.OPTUNA_TRIALS
@@ -446,11 +489,8 @@ class ModelTraining:
             except Exception as e:
                 print(f"LightGBM 튜닝 실패, 기본 파라미터 사용: {e}")
                 self.train_lightgbm(X_train, y_train, X_val, y_val)
-        else:
-            self.train_lightgbm(X_train, y_train, X_val, y_val)
-        
-        if use_optimization:
-            print("XGBoost 하이퍼파라미터 튜닝 중")
+            
+            # XGBoost 튜닝
             try:
                 best_params, _ = self.hyperparameter_optimization(
                     X_train, y_train, 'xgboost', n_trials=Config.OPTUNA_TRIALS
@@ -460,49 +500,58 @@ class ModelTraining:
                 print(f"XGBoost 튜닝 실패, 기본 파라미터 사용: {e}")
                 self.train_xgboost(X_train, y_train, X_val, y_val)
         else:
+            self.train_lightgbm(X_train, y_train, X_val, y_val)
             self.train_xgboost(X_train, y_train, X_val, y_val)
         
+        # 기타 모델들 훈련
         self.train_random_forest(X_train, y_train)
         self.train_gradient_boosting(X_train, y_train)
+        self.train_extra_trees(X_train, y_train)
         
         # None인 모델 제거
         self.models = {k: v for k, v in self.models.items() if v is not None}
         
-        # 교차 검증
+        # 안정적인 교차 검증
         if self.models:
-            self.cross_validation(X_train, y_train)
-        
-            # 앙상블 생성
-            voting_ensemble = self.create_voting_ensemble(X_train, y_train)
+            self.stable_cross_validation(X_train, y_train)
+            
+            # 가중치 기반 앙상블 생성
+            ensemble = self.create_weighted_ensemble(X_train, y_train)
             
             # 앙상블 성능 검증
-            if voting_ensemble is not None:
+            if ensemble is not None:
                 try:
                     ensemble_cv = cross_val_score(
-                        voting_ensemble, X_train, y_train, 
+                        ensemble, X_train, y_train, 
                         cv=3, scoring=self.scorer, n_jobs=1
                     )
                     
-                    self.cv_scores['voting_ensemble'] = {
-                        'scores': ensemble_cv,
-                        'mean': ensemble_cv.mean(),
-                        'std': ensemble_cv.std()
+                    ensemble_score = ensemble_cv.mean()
+                    ensemble_std = ensemble_cv.std()
+                    stability_score = ensemble_score - (ensemble_std * 2)
+                    
+                    ensemble_name = 'weighted_ensemble' if 'weighted_ensemble' in self.models else 'voting_ensemble'
+                    
+                    self.cv_scores[ensemble_name] = {
+                        'scores': {'ensemble': {'scores': ensemble_cv, 'mean': ensemble_score, 'std': ensemble_std}},
+                        'mean': ensemble_score,
+                        'std': ensemble_std,
+                        'stability_score': stability_score
                     }
                     
-                    print(f"voting_ensemble CV 점수: {ensemble_cv.mean():.4f} (+/- {ensemble_cv.std() * 2:.4f})")
+                    print(f"{ensemble_name} 안정성 점수: {stability_score:.4f}")
                     
-                    # 앙상블이 더 좋으면 업데이트
-                    if ensemble_cv.mean() > self.best_score:
-                        self.best_model = voting_ensemble
-                        self.best_score = ensemble_cv.mean()
-                        print("voting_ensemble이 최고 성능 모델로 선택됨")
+                    # 앙상블이 더 안정적이면 업데이트
+                    if stability_score > self.best_score:
+                        self.best_model = ensemble
+                        self.best_score = stability_score
+                        print(f"{ensemble_name}이 최고 안정성 모델로 선택됨")
                         
                 except Exception as e:
-                    print(f"voting_ensemble 검증 실패: {e}")
+                    print(f"앙상블 검증 실패: {e}")
         
         # 최고 모델이 없으면 기본 모델 선택
         if self.best_model is None and self.models:
-            # 첫 번째 유효한 모델을 선택
             for model_name, model in self.models.items():
                 if model is not None:
                     self.best_model = model
@@ -522,7 +571,7 @@ class ModelTraining:
                     'model': model_name,
                     'mean': scores['mean'],
                     'std': scores['std'],
-                    'scores': scores['scores'].tolist() if hasattr(scores['scores'], 'tolist') else scores['scores']
+                    'stability_score': scores.get('stability_score', scores['mean'])
                 })
             
             cv_results_df = pd.DataFrame(cv_results_data)
@@ -530,7 +579,6 @@ class ModelTraining:
             from utils import save_results
             save_results(cv_results_df, Config.CV_RESULTS_FILE)
         
-        # 메모리 정리
         gc.collect()
         
         print("전체 모델 훈련 완료")
@@ -539,101 +587,56 @@ class ModelTraining:
         return self.models, self.best_model
     
     @timer
-    def train_conservative_models(self, X_train, y_train):
-        """보수적 모델 훈련"""
-        print("보수적 모델 훈련 시작")
+    def train_stable_models(self, X_train, y_train):
+        """안정적인 모델 훈련"""
+        print("안정적인 모델 훈련 시작")
         
-        # 보수적 파라미터
-        conservative_lgbm_params = {
-            'objective': 'multiclass',
-            'num_class': Config.N_CLASSES,
-            'metric': 'multi_logloss',
-            'boosting_type': 'gbdt',
-            'is_unbalance': True,
-            'num_leaves': 31,
-            'learning_rate': 0.05,
-            'feature_fraction': 0.7,
-            'bagging_fraction': 0.7,
-            'bagging_freq': 5,
-            'min_child_samples': 20,
-            'min_child_weight': 0.01,
-            'min_split_gain': 0.01,
-            'reg_alpha': 0.1,
-            'reg_lambda': 0.1,
-            'max_depth': 6,
-            'verbose': -1,
-            'random_state': Config.RANDOM_STATE,
-            'n_estimators': 200,
-            'n_jobs': Config.N_JOBS,
-            'force_col_wise': True
-        }
+        # 안정적인 파라미터
+        stable_params = Config.get_stable_params()
         
-        conservative_xgb_params = {
-            'objective': 'multi:softprob',
-            'num_class': Config.N_CLASSES,
-            'learning_rate': 0.03,
-            'max_depth': 4,
-            'subsample': 0.6,
-            'colsample_bytree': 0.6,
-            'reg_alpha': 0.3,
-            'reg_lambda': 0.3,
-            'gamma': 0.2,
-            'min_child_weight': 20,
-            'random_state': Config.RANDOM_STATE,
-            'n_estimators': 150,
-            'n_jobs': Config.N_JOBS,
-            'tree_method': 'hist',
-            'verbosity': 0
-        }
-        
-        conservative_rf_params = {
-            'n_estimators': 100,
-            'max_depth': 6,
-            'min_samples_split': 20,
-            'min_samples_leaf': 10,
-            'max_features': 'sqrt',
-            'random_state': Config.RANDOM_STATE,
-            'n_jobs': Config.N_JOBS,
-            'class_weight': 'balanced',
-            'bootstrap': True
-        }
-        
-        # 보수적 모델들 훈련
-        conservative_models = {}
+        stable_models = {}
         
         # LightGBM
         try:
-            lgbm_model = self.train_lightgbm(X_train, y_train, params=conservative_lgbm_params)
+            lgbm_model = self.train_lightgbm(X_train, y_train, params=stable_params['lgbm'])
             if lgbm_model is not None:
-                conservative_models['conservative_lightgbm'] = lgbm_model
+                stable_models['stable_lightgbm'] = lgbm_model
         except Exception as e:
-            print(f"보수적 LightGBM 훈련 실패: {e}")
+            print(f"안정적인 LightGBM 훈련 실패: {e}")
         
         # XGBoost
         try:
-            xgb_model = self.train_xgboost(X_train, y_train, params=conservative_xgb_params)
+            xgb_model = self.train_xgboost(X_train, y_train, params=stable_params['xgb'])
             if xgb_model is not None:
-                conservative_models['conservative_xgboost'] = xgb_model
+                stable_models['stable_xgboost'] = xgb_model
         except Exception as e:
-            print(f"보수적 XGBoost 훈련 실패: {e}")
+            print(f"안정적인 XGBoost 훈련 실패: {e}")
         
         # Random Forest
         try:
-            rf_model = self.train_random_forest(X_train, y_train, params=conservative_rf_params)
+            rf_model = self.train_random_forest(X_train, y_train, params=stable_params['rf'])
             if rf_model is not None:
-                conservative_models['conservative_random_forest'] = rf_model
+                stable_models['stable_random_forest'] = rf_model
         except Exception as e:
-            print(f"보수적 Random Forest 훈련 실패: {e}")
+            print(f"안정적인 Random Forest 훈련 실패: {e}")
+        
+        # Gradient Boosting
+        try:
+            gb_model = self.train_gradient_boosting(X_train, y_train, params=stable_params['gb'])
+            if gb_model is not None:
+                stable_models['stable_gradient_boosting'] = gb_model
+        except Exception as e:
+            print(f"안정적인 Gradient Boosting 훈련 실패: {e}")
         
         # 교차 검증으로 최고 모델 선택
-        if conservative_models:
-            print(f"보수적 모델 교차 검증 시작")
+        if stable_models:
+            print(f"안정적인 모델 교차 검증 시작")
             cv_strategy = StratifiedKFold(n_splits=3, shuffle=True, random_state=Config.RANDOM_STATE)
             
             best_score = 0
-            best_conservative_model = None
+            best_stable_model = None
             
-            for model_name, model in conservative_models.items():
+            for model_name, model in stable_models.items():
                 try:
                     cv_scores = cross_val_score(
                         model, X_train, y_train, 
@@ -642,24 +645,22 @@ class ModelTraining:
                     
                     mean_score = cv_scores.mean()
                     std_score = cv_scores.std()
+                    stability_score = mean_score - (std_score * 2)
                     
-                    print(f"{model_name} CV: {mean_score:.4f} (+/- {std_score*2:.4f})")
+                    print(f"{model_name} 안정성 점수: {stability_score:.4f} (평균: {mean_score:.4f}, 표준편차: {std_score:.4f})")
                     
-                    if mean_score > best_score:
-                        best_score = mean_score
-                        best_conservative_model = model
+                    if stability_score > best_score:
+                        best_score = stability_score
+                        best_stable_model = model
                         
                 except Exception as e:
                     print(f"{model_name} 교차 검증 실패: {e}")
                     continue
             
-            if best_conservative_model is not None:
-                print(f"최고 보수적 모델 선택 완료, CV 점수: {best_score:.4f}")
-                
-                # 최고 모델 저장
-                save_model(best_conservative_model, Config.MODEL_FILE)
-                
-                return conservative_models, best_conservative_model
+            if best_stable_model is not None:
+                print(f"최고 안정적인 모델 선택 완료, 안정성 점수: {best_score:.4f}")
+                save_model(best_stable_model, Config.MODEL_FILE)
+                return stable_models, best_stable_model
         
-        print("보수적 모델 훈련 실패, 기존 모델 사용")
+        print("안정적인 모델 훈련 실패, 기존 모델 사용")
         return {}, self.best_model

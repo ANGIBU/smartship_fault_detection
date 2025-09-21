@@ -15,6 +15,8 @@ import psutil
 from pathlib import Path
 import gc
 import os
+from scipy.stats import zscore
+from scipy.signal import find_peaks
 
 warnings.filterwarnings('ignore')
 
@@ -200,6 +202,215 @@ def calculate_class_metrics(y_true, y_pred, labels=None):
     except Exception as e:
         print(f"클래스 메트릭 계산 중 오류: {e}")
         return []
+
+def analyze_sensor_data_quality(df, sensor_columns):
+    """센서 데이터 품질 분석"""
+    print("센서 데이터 품질 분석")
+    
+    quality_report = {
+        'total_sensors': len(sensor_columns),
+        'sensor_stats': {},
+        'quality_issues': [],
+        'recommendations': []
+    }
+    
+    for sensor in sensor_columns:
+        if sensor not in df.columns:
+            quality_report['quality_issues'].append(f"센서 누락: {sensor}")
+            continue
+        
+        sensor_data = df[sensor]
+        
+        # 기본 통계
+        stats = {
+            'count': len(sensor_data),
+            'missing': sensor_data.isnull().sum(),
+            'zeros': (sensor_data == 0).sum(),
+            'mean': sensor_data.mean(),
+            'std': sensor_data.std(),
+            'min': sensor_data.min(),
+            'max': sensor_data.max(),
+            'range': sensor_data.max() - sensor_data.min()
+        }
+        
+        # 이상치 검출
+        if len(sensor_data.dropna()) > 0:
+            z_scores = np.abs(zscore(sensor_data.dropna()))
+            outliers = np.sum(z_scores > 3)
+            stats['outliers'] = outliers
+            stats['outlier_rate'] = outliers / len(sensor_data) * 100
+        else:
+            stats['outliers'] = 0
+            stats['outlier_rate'] = 0
+        
+        # 변동성 분석
+        if stats['std'] > 0:
+            stats['cv'] = stats['std'] / abs(stats['mean']) if stats['mean'] != 0 else np.inf
+        else:
+            stats['cv'] = 0
+        
+        # 신호 안정성
+        if len(sensor_data) > 1:
+            diff = np.diff(sensor_data.fillna(sensor_data.mean()))
+            stats['signal_stability'] = np.std(diff)
+        else:
+            stats['signal_stability'] = 0
+        
+        quality_report['sensor_stats'][sensor] = stats
+        
+        # 품질 문제 식별
+        if stats['missing'] > len(sensor_data) * 0.1:
+            quality_report['quality_issues'].append(f"{sensor}: 결측치 비율 높음 ({stats['missing']/len(sensor_data)*100:.1f}%)")
+        
+        if stats['outlier_rate'] > 5:
+            quality_report['quality_issues'].append(f"{sensor}: 이상치 비율 높음 ({stats['outlier_rate']:.1f}%)")
+        
+        if stats['cv'] > 2:
+            quality_report['quality_issues'].append(f"{sensor}: 변동성 매우 높음 (CV: {stats['cv']:.2f})")
+        
+        if stats['zeros'] > len(sensor_data) * 0.2:
+            quality_report['quality_issues'].append(f"{sensor}: 0값 비율 높음 ({stats['zeros']/len(sensor_data)*100:.1f}%)")
+    
+    # 권장사항 생성
+    if quality_report['quality_issues']:
+        quality_report['recommendations'].append("센서 데이터 정제 필요")
+        quality_report['recommendations'].append("이상치 처리 방법 검토")
+        quality_report['recommendations'].append("센서 캘리브레이션 확인")
+    
+    return quality_report
+
+def detect_sensor_anomalies(df, sensor_columns, method='zscore'):
+    """센서 이상 감지"""
+    print(f"센서 이상 감지 ({method})")
+    
+    anomaly_report = {
+        'method': method,
+        'sensor_anomalies': {},
+        'total_anomalies': 0
+    }
+    
+    for sensor in sensor_columns:
+        if sensor not in df.columns:
+            continue
+        
+        sensor_data = df[sensor].dropna()
+        if len(sensor_data) == 0:
+            continue
+        
+        if method == 'zscore':
+            # Z-score 기반 이상 감지
+            z_scores = np.abs(zscore(sensor_data))
+            anomaly_mask = z_scores > 3
+            anomaly_indices = sensor_data.index[anomaly_mask]
+            
+        elif method == 'iqr':
+            # IQR 기반 이상 감지
+            Q1 = sensor_data.quantile(0.25)
+            Q3 = sensor_data.quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            
+            anomaly_mask = (sensor_data < lower_bound) | (sensor_data > upper_bound)
+            anomaly_indices = sensor_data.index[anomaly_mask]
+            
+        elif method == 'peaks':
+            # 피크 기반 이상 감지
+            peaks, _ = find_peaks(sensor_data, height=sensor_data.mean() + 2*sensor_data.std())
+            anomaly_indices = sensor_data.index[peaks]
+            
+        else:
+            anomaly_indices = []
+        
+        anomaly_count = len(anomaly_indices)
+        anomaly_rate = anomaly_count / len(sensor_data) * 100
+        
+        anomaly_report['sensor_anomalies'][sensor] = {
+            'count': anomaly_count,
+            'rate': anomaly_rate,
+            'indices': anomaly_indices.tolist()
+        }
+        
+        anomaly_report['total_anomalies'] += anomaly_count
+        
+        if anomaly_rate > 5:
+            print(f"{sensor}: 이상 비율 높음 ({anomaly_rate:.1f}%)")
+    
+    return anomaly_report
+
+def analyze_sensor_correlations(df, sensor_groups):
+    """센서 그룹별 상관관계 분석"""
+    print("센서 그룹별 상관관계 분석")
+    
+    correlation_report = {
+        'group_correlations': {},
+        'cross_group_correlations': {},
+        'high_correlations': [],
+        'low_correlations': []
+    }
+    
+    # 그룹 내 상관관계
+    for group_name, sensors in sensor_groups.items():
+        valid_sensors = [s for s in sensors if s in df.columns]
+        if len(valid_sensors) < 2:
+            continue
+        
+        group_data = df[valid_sensors]
+        corr_matrix = group_data.corr()
+        
+        # 상삼각행렬만 추출
+        upper_triangle = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+        
+        # 통계 계산
+        correlations = upper_triangle.stack().dropna()
+        
+        group_stats = {
+            'sensors': valid_sensors,
+            'mean_correlation': correlations.mean(),
+            'max_correlation': correlations.max(),
+            'min_correlation': correlations.min(),
+            'std_correlation': correlations.std()
+        }
+        
+        correlation_report['group_correlations'][group_name] = group_stats
+        
+        # 높은 상관관계 (>0.8) 식별
+        high_corr = correlations[correlations > 0.8]
+        for (sensor1, sensor2), corr_val in high_corr.items():
+            correlation_report['high_correlations'].append({
+                'group': group_name,
+                'sensor1': sensor1,
+                'sensor2': sensor2,
+                'correlation': corr_val
+            })
+        
+        # 낮은 상관관계 (<0.1) 식별
+        low_corr = correlations[correlations < 0.1]
+        for (sensor1, sensor2), corr_val in low_corr.items():
+            correlation_report['low_correlations'].append({
+                'group': group_name,
+                'sensor1': sensor1,
+                'sensor2': sensor2,
+                'correlation': corr_val
+            })
+    
+    # 그룹 간 상관관계
+    group_names = list(sensor_groups.keys())
+    for i, group1 in enumerate(group_names):
+        for j, group2 in enumerate(group_names[i+1:], i+1):
+            sensors1 = [s for s in sensor_groups[group1] if s in df.columns]
+            sensors2 = [s for s in sensor_groups[group2] if s in df.columns]
+            
+            if len(sensors1) > 0 and len(sensors2) > 0:
+                # 각 그룹의 대표값 (평균) 계산
+                group1_mean = df[sensors1].mean(axis=1)
+                group2_mean = df[sensors2].mean(axis=1)
+                
+                cross_corr = group1_mean.corr(group2_mean)
+                
+                correlation_report['cross_group_correlations'][f'{group1}_vs_{group2}'] = cross_corr
+    
+    return correlation_report
 
 def print_classification_metrics(y_true, y_pred, class_names=None, target_names=None):
     """분류 성능 메트릭 출력"""
@@ -629,3 +840,45 @@ def optimize_dataframe_memory(df):
     except Exception as e:
         print(f"메모리 최적화 실패: {e}")
         return df
+
+def generate_system_report(validation_scores, cv_scores, memory_info, execution_time):
+    """시스템 성능 보고서 생성"""
+    print("\n" + "=" * 60)
+    print("시스템 성능 보고서")
+    print("=" * 60)
+    
+    # 성능 점수 분석
+    if validation_scores:
+        print("\n검증 점수 분석:")
+        for val_type, score in validation_scores.items():
+            print(f"  {val_type:15s}: {score:.4f}")
+        
+        scores = list(validation_scores.values())
+        mean_score = np.mean(scores)
+        std_score = np.std(scores)
+        print(f"  평균 점수       : {mean_score:.4f}")
+        print(f"  표준편차        : {std_score:.4f}")
+        print(f"  안정성 지수     : {1-std_score:.4f}")
+    
+    # 교차 검증 결과
+    if cv_scores:
+        print("\n교차 검증 결과:")
+        for model_name, scores in cv_scores.items():
+            stability_score = scores.get('stability_score', scores['mean'])
+            print(f"  {model_name:15s}: {stability_score:.4f}")
+    
+    # 메모리 사용량
+    if memory_info:
+        print("\n메모리 사용량:")
+        print(f"  초기 메모리     : {memory_info['initial']:.2f} MB")
+        print(f"  최종 메모리     : {memory_info['final']:.2f} MB")
+        print(f"  증가량          : {memory_info['increase']:.2f} MB")
+    
+    # 실행 시간
+    if execution_time:
+        print(f"\n총 실행 시간     : {format_time(execution_time)}")
+    
+    # 시스템 리소스
+    resource_info = check_system_resources()
+    
+    print("=" * 60)

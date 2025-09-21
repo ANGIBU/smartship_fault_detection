@@ -7,6 +7,8 @@ from sklearn.feature_selection import SelectKBest, mutual_info_classif, f_classi
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier
 from scipy.stats import skew, kurtosis
+from scipy.signal import find_peaks, welch
+from scipy import fft
 import gc
 import warnings
 warnings.filterwarnings('ignore')
@@ -32,7 +34,6 @@ class DataProcessor:
         
         # 메모리 효율적 로드
         dtypes = {col: 'float32' for col in self.feature_columns}
-        # ID 컬럼은 문자열이므로 dtype 지정하지 않음
         
         # 청크 단위로 로드
         train_chunks = []
@@ -41,7 +42,6 @@ class DataProcessor:
         try:
             # 훈련 데이터 로드
             for chunk in pd.read_csv(Config.TRAIN_FILE, dtype=dtypes, chunksize=Config.CHUNK_SIZE):
-                # 메모리 사용량 감소
                 if Config.TARGET_COLUMN in chunk.columns:
                     chunk[Config.TARGET_COLUMN] = chunk[Config.TARGET_COLUMN].astype('int16')
                 train_chunks.append(chunk)
@@ -60,7 +60,6 @@ class DataProcessor:
             
         except Exception as e:
             print(f"청크 로드 실패, 일반 로드 시도: {e}")
-            # 일반 로드 시에도 dtype에서 ID 컬럼 제외
             train_df = pd.read_csv(Config.TRAIN_FILE)
             test_df = pd.read_csv(Config.TEST_FILE)
             
@@ -105,86 +104,185 @@ class DataProcessor:
         
         return train_df, test_df
     
-    def _create_basic_statistics(self, X_train, X_test):
-        """기본 통계 피처 생성"""
-        print("기본 통계 피처 생성 중")
+    def _create_signal_features(self, X_train, X_test):
+        """신호 처리 피처 생성"""
+        print("신호 처리 피처 생성 중")
         
-        # 배치 처리로 메모리 절약
-        batch_size = 1000
-        n_samples_train = len(X_train)
-        n_samples_test = len(X_test)
-        
-        # 결과 저장용 배열
-        train_features = {}
-        test_features = {}
-        
-        # 피처 이름 리스트
-        feature_names = ['sensor_mean', 'sensor_std', 'sensor_median', 'sensor_min', 'sensor_max', 
-                        'sensor_range', 'sensor_q25', 'sensor_q75', 'sensor_iqr', 'sensor_skew', 'sensor_kurtosis']
-        
-        for name in feature_names:
-            train_features[name] = np.zeros(n_samples_train, dtype='float32')
-            test_features[name] = np.zeros(n_samples_test, dtype='float32')
-        
-        # 훈련 데이터 배치 처리
-        for i in range(0, n_samples_train, batch_size):
-            end_idx = min(i + batch_size, n_samples_train)
-            batch_data = X_train[self.feature_columns].iloc[i:end_idx].values
-            
-            train_features['sensor_mean'][i:end_idx] = np.mean(batch_data, axis=1)
-            train_features['sensor_std'][i:end_idx] = np.std(batch_data, axis=1)
-            train_features['sensor_median'][i:end_idx] = np.median(batch_data, axis=1)
-            train_features['sensor_min'][i:end_idx] = np.min(batch_data, axis=1)
-            train_features['sensor_max'][i:end_idx] = np.max(batch_data, axis=1)
-            train_features['sensor_range'][i:end_idx] = train_features['sensor_max'][i:end_idx] - train_features['sensor_min'][i:end_idx]
-            train_features['sensor_q25'][i:end_idx] = np.percentile(batch_data, 25, axis=1)
-            train_features['sensor_q75'][i:end_idx] = np.percentile(batch_data, 75, axis=1)
-            train_features['sensor_iqr'][i:end_idx] = train_features['sensor_q75'][i:end_idx] - train_features['sensor_q25'][i:end_idx]
-            train_features['sensor_skew'][i:end_idx] = skew(batch_data, axis=1, nan_policy='omit')
-            train_features['sensor_kurtosis'][i:end_idx] = kurtosis(batch_data, axis=1, nan_policy='omit')
-        
-        # 테스트 데이터 배치 처리
-        for i in range(0, n_samples_test, batch_size):
-            end_idx = min(i + batch_size, n_samples_test)
-            batch_data = X_test[self.feature_columns].iloc[i:end_idx].values
-            
-            test_features['sensor_mean'][i:end_idx] = np.mean(batch_data, axis=1)
-            test_features['sensor_std'][i:end_idx] = np.std(batch_data, axis=1)
-            test_features['sensor_median'][i:end_idx] = np.median(batch_data, axis=1)
-            test_features['sensor_min'][i:end_idx] = np.min(batch_data, axis=1)
-            test_features['sensor_max'][i:end_idx] = np.max(batch_data, axis=1)
-            test_features['sensor_range'][i:end_idx] = test_features['sensor_max'][i:end_idx] - test_features['sensor_min'][i:end_idx]
-            test_features['sensor_q25'][i:end_idx] = np.percentile(batch_data, 25, axis=1)
-            test_features['sensor_q75'][i:end_idx] = np.percentile(batch_data, 75, axis=1)
-            test_features['sensor_iqr'][i:end_idx] = test_features['sensor_q75'][i:end_idx] - test_features['sensor_q25'][i:end_idx]
-            test_features['sensor_skew'][i:end_idx] = skew(batch_data, axis=1, nan_policy='omit')
-            test_features['sensor_kurtosis'][i:end_idx] = kurtosis(batch_data, axis=1, nan_policy='omit')
-        
-        # DataFrame에 추가
-        for name in feature_names:
-            X_train[name] = train_features[name]
-            X_test[name] = test_features[name]
-        
-        return X_train, X_test
-    
-    def _create_group_statistics(self, X_train, X_test):
-        """센서 그룹별 통계 피처 생성"""
-        print("센서 그룹 통계 피처 생성 중")
-        
+        # 각 센서 그룹별로 신호 특성 추출
         for group_name, sensors in self.sensor_groups.items():
             valid_sensors = [s for s in sensors if s in self.feature_columns]
             if len(valid_sensors) >= 2:
-                # 메모리 효율적 처리
                 for df in [X_train, X_test]:
                     group_data = df[valid_sensors].values.astype('float32')
                     
-                    df[f'{group_name}_mean'] = np.mean(group_data, axis=1).astype('float32')
-                    df[f'{group_name}_std'] = np.std(group_data, axis=1).astype('float32')
-                    df[f'{group_name}_max'] = np.max(group_data, axis=1).astype('float32')
-                    df[f'{group_name}_min'] = np.min(group_data, axis=1).astype('float32')
+                    # FFT 기반 주파수 도메인 특성
+                    fft_features = []
+                    for i in range(group_data.shape[0]):
+                        signal = group_data[i]
+                        
+                        # FFT 변환
+                        fft_vals = np.abs(fft.fft(signal))
+                        
+                        # 주요 주파수 성분
+                        dominant_freq_idx = np.argmax(fft_vals[1:len(fft_vals)//2]) + 1
+                        dominant_freq_power = fft_vals[dominant_freq_idx]
+                        
+                        # 주파수 대역별 에너지
+                        low_freq_energy = np.sum(fft_vals[1:len(fft_vals)//4])
+                        mid_freq_energy = np.sum(fft_vals[len(fft_vals)//4:len(fft_vals)//2])
+                        
+                        fft_features.append([dominant_freq_power, low_freq_energy, mid_freq_energy])
                     
-                    # 메모리 정리
-                    del group_data
+                    fft_features = np.array(fft_features, dtype='float32')
+                    
+                    df[f'{group_name}_dominant_freq'] = fft_features[:, 0]
+                    df[f'{group_name}_low_freq_energy'] = fft_features[:, 1]
+                    df[f'{group_name}_mid_freq_energy'] = fft_features[:, 2]
+                    
+                    # 시간 도메인 특성
+                    df[f'{group_name}_rms'] = np.sqrt(np.mean(group_data**2, axis=1)).astype('float32')
+                    df[f'{group_name}_peak_to_peak'] = (np.max(group_data, axis=1) - np.min(group_data, axis=1)).astype('float32')
+                    df[f'{group_name}_crest_factor'] = (np.max(np.abs(group_data), axis=1) / np.sqrt(np.mean(group_data**2, axis=1))).astype('float32')
+                    
+                    # 상관관계 기반 특성
+                    correlation_matrix = np.corrcoef(group_data.T)
+                    correlation_matrix = np.nan_to_num(correlation_matrix, nan=0.0)
+                    
+                    # 평균 상관계수
+                    upper_triangle = correlation_matrix[np.triu_indices_from(correlation_matrix, k=1)]
+                    avg_correlation = np.mean(upper_triangle) if len(upper_triangle) > 0 else 0.0
+                    df[f'{group_name}_avg_correlation'] = avg_correlation
+        
+        return X_train, X_test
+    
+    def _create_statistical_features(self, X_train, X_test):
+        """통계적 피처 생성"""
+        print("통계적 피처 생성 중")
+        
+        # 배치 처리로 메모리 절약
+        batch_size = 1000
+        
+        for df_name, df in [('train', X_train), ('test', X_test)]:
+            n_samples = len(df)
+            
+            # 전역 통계 피처
+            global_features = {
+                'sensor_mean': np.zeros(n_samples, dtype='float32'),
+                'sensor_std': np.zeros(n_samples, dtype='float32'),
+                'sensor_median': np.zeros(n_samples, dtype='float32'),
+                'sensor_mad': np.zeros(n_samples, dtype='float32'),
+                'sensor_iqr': np.zeros(n_samples, dtype='float32'),
+                'sensor_skew': np.zeros(n_samples, dtype='float32'),
+                'sensor_kurtosis': np.zeros(n_samples, dtype='float32'),
+                'sensor_entropy': np.zeros(n_samples, dtype='float32'),
+                'sensor_energy': np.zeros(n_samples, dtype='float32')
+            }
+            
+            # 배치별 처리
+            for i in range(0, n_samples, batch_size):
+                end_idx = min(i + batch_size, n_samples)
+                batch_data = df[self.feature_columns].iloc[i:end_idx].values
+                
+                # 기본 통계
+                global_features['sensor_mean'][i:end_idx] = np.mean(batch_data, axis=1)
+                global_features['sensor_std'][i:end_idx] = np.std(batch_data, axis=1)
+                global_features['sensor_median'][i:end_idx] = np.median(batch_data, axis=1)
+                
+                # MAD (Median Absolute Deviation)
+                medians = np.median(batch_data, axis=1, keepdims=True)
+                global_features['sensor_mad'][i:end_idx] = np.median(np.abs(batch_data - medians), axis=1)
+                
+                # IQR
+                q75 = np.percentile(batch_data, 75, axis=1)
+                q25 = np.percentile(batch_data, 25, axis=1)
+                global_features['sensor_iqr'][i:end_idx] = q75 - q25
+                
+                # 왜도와 첨도
+                global_features['sensor_skew'][i:end_idx] = skew(batch_data, axis=1, nan_policy='omit')
+                global_features['sensor_kurtosis'][i:end_idx] = kurtosis(batch_data, axis=1, nan_policy='omit')
+                
+                # 엔트로피 (히스토그램 기반)
+                entropies = []
+                for row in batch_data:
+                    hist, _ = np.histogram(row, bins=10, density=True)
+                    hist = hist + 1e-10  # 0 방지
+                    entropy = -np.sum(hist * np.log2(hist))
+                    entropies.append(entropy)
+                global_features['sensor_entropy'][i:end_idx] = entropies
+                
+                # 에너지
+                global_features['sensor_energy'][i:end_idx] = np.sum(batch_data**2, axis=1)
+            
+            # DataFrame에 추가
+            for feature_name, values in global_features.items():
+                df[feature_name] = values
+        
+        return X_train, X_test
+    
+    def _create_interaction_features(self, X_train, X_test):
+        """상호작용 피처 생성"""
+        print("상호작용 피처 생성 중")
+        
+        # 중요한 센서 그룹 간 상호작용
+        important_groups = ['vibration', 'temperature', 'pressure', 'power']
+        
+        for i, group1 in enumerate(important_groups):
+            for j, group2 in enumerate(important_groups[i+1:], i+1):
+                sensors1 = [s for s in self.sensor_groups[group1] if s in self.feature_columns]
+                sensors2 = [s for s in self.sensor_groups[group2] if s in self.feature_columns]
+                
+                if len(sensors1) >= 1 and len(sensors2) >= 1:
+                    for df in [X_train, X_test]:
+                        # 그룹별 대표값
+                        group1_repr = df[sensors1].mean(axis=1)
+                        group2_repr = df[sensors2].mean(axis=1)
+                        
+                        # 비율
+                        with np.errstate(divide='ignore', invalid='ignore'):
+                            ratio = group1_repr / (group2_repr + 1e-10)
+                            ratio = np.nan_to_num(ratio, nan=0.0, posinf=1.0, neginf=-1.0)
+                        
+                        df[f'{group1}_{group2}_ratio'] = ratio.astype('float32')
+                        
+                        # 곱
+                        df[f'{group1}_{group2}_product'] = (group1_repr * group2_repr).astype('float32')
+                        
+                        # 차이
+                        df[f'{group1}_{group2}_diff'] = (group1_repr - group2_repr).astype('float32')
+        
+        return X_train, X_test
+    
+    def _create_sensor_health_features(self, X_train, X_test):
+        """센서 상태 피처 생성"""
+        print("센서 상태 피처 생성 중")
+        
+        for df in [X_train, X_test]:
+            # 센서 값 변동성
+            sensor_data = df[self.feature_columns].values
+            
+            # 변화율 (차분)
+            diff_features = np.diff(sensor_data, axis=1, prepend=sensor_data[:, [0]])
+            df['sensor_change_mean'] = np.mean(np.abs(diff_features), axis=1).astype('float32')
+            df['sensor_change_std'] = np.std(diff_features, axis=1).astype('float32')
+            
+            # 이상치 개수 (IQR 기준)
+            q75 = np.percentile(sensor_data, 75, axis=1, keepdims=True)
+            q25 = np.percentile(sensor_data, 25, axis=1, keepdims=True)
+            iqr = q75 - q25
+            
+            lower_bound = q25 - 1.5 * iqr
+            upper_bound = q75 + 1.5 * iqr
+            
+            outliers = ((sensor_data < lower_bound) | (sensor_data > upper_bound)).sum(axis=1)
+            df['sensor_outlier_count'] = outliers.astype('float32')
+            
+            # 센서 범위 활용도
+            sensor_ranges = np.max(sensor_data, axis=1) - np.min(sensor_data, axis=1)
+            df['sensor_range_utilization'] = sensor_ranges.astype('float32')
+            
+            # 0에 가까운 센서 개수
+            near_zero = (np.abs(sensor_data) < 0.01).sum(axis=1)
+            df['sensor_near_zero_count'] = near_zero.astype('float32')
         
         return X_train, X_test
     
@@ -202,10 +300,17 @@ class DataProcessor:
         del train_df, test_df
         gc.collect()
         
-        # 기본 통계 피처 생성
-        if Config.STATISTICAL_FEATURES:
-            X_train, X_test = self._create_basic_statistics(X_train, X_test)
-            X_train, X_test = self._create_group_statistics(X_train, X_test)
+        # 신호 처리 피처 생성
+        X_train, X_test = self._create_signal_features(X_train, X_test)
+        
+        # 통계적 피처 생성
+        X_train, X_test = self._create_statistical_features(X_train, X_test)
+        
+        # 상호작용 피처 생성
+        X_train, X_test = self._create_interaction_features(X_train, X_test)
+        
+        # 센서 상태 피처 생성
+        X_train, X_test = self._create_sensor_health_features(X_train, X_test)
         
         # 최종 데이터 정리
         X_train, X_test = self._final_cleanup(X_train, X_test)
@@ -218,7 +323,6 @@ class DataProcessor:
         
         # 무한값과 NaN 처리
         for df in [X_train, X_test]:
-            # 무한값을 NaN으로 변환
             numeric_cols = df.select_dtypes(include=[np.number]).columns
             df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
             
@@ -264,7 +368,6 @@ class DataProcessor:
         
         # 배치 스케일링으로 메모리 절약
         if len(X_train) > 10000:
-            # 샘플링하여 스케일러 피팅
             sample_size = min(10000, len(X_train))
             sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
                 len(X_train), sample_size, replace=False
@@ -301,21 +404,66 @@ class DataProcessor:
         return X_train_scaled, X_test_scaled
     
     @timer
-    def select_features(self, X_train, X_test, y_train, method='conservative', k=None):
-        """피처 선택 (과적합 방지 강화)"""
+    def select_features(self, X_train, X_test, y_train, method='domain_based', k=None):
+        """피처 선택"""
         if k is None:
-            k = min(25, X_train.shape[1])  # 더 적은 피처 선택
+            k = min(40, X_train.shape[1])
         
         k = min(k, X_train.shape[1])
         
         print(f"피처 선택 시작 ({method}, k={k})")
         print(f"원본 피처 개수: {X_train.shape[1]}")
         
-        if method == 'conservative':
-            # 여러 방법을 조합한 보수적 피처 선택
-            print("보수적 피처 선택 적용")
+        if method == 'domain_based':
+            # 도메인 지식 기반 피처 선택
+            print("도메인 기반 피처 선택 적용")
             
-            # 1. 분산 기반 사전 필터링
+            # 1. 원본 센서 피처 우선 선택
+            original_features = [col for col in self.feature_columns if col in X_train.columns]
+            
+            # 2. 신호 처리 피처 추가
+            signal_features = [col for col in X_train.columns if any(x in col for x in 
+                              ['rms', 'peak_to_peak', 'crest_factor', 'dominant_freq', 'energy'])]
+            
+            # 3. 통계적 피처 추가
+            stat_features = [col for col in X_train.columns if any(x in col for x in 
+                           ['sensor_mean', 'sensor_std', 'sensor_mad', 'sensor_entropy'])]
+            
+            # 4. 상호작용 피처 추가
+            interaction_features = [col for col in X_train.columns if '_ratio' in col or '_product' in col]
+            
+            # 우선순위별 피처 조합
+            priority_features = original_features + signal_features + stat_features + interaction_features
+            
+            # 중복 제거
+            priority_features = list(dict.fromkeys(priority_features))
+            
+            # k개까지 선택
+            if len(priority_features) > k:
+                # F-test로 최종 선택
+                from sklearn.feature_selection import SelectKBest, f_classif
+                
+                selector = SelectKBest(f_classif, k=k)
+                
+                # 샘플링으로 피처 선택
+                if len(X_train) > 5000:
+                    sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
+                        len(X_train), 5000, replace=False
+                    )
+                    X_sample = X_train[priority_features].iloc[sample_idx]
+                    y_sample = y_train.iloc[sample_idx]
+                    selector.fit(X_sample, y_sample)
+                    del X_sample, y_sample
+                else:
+                    selector.fit(X_train[priority_features], y_train)
+                
+                selected_mask = selector.get_support()
+                self.selected_features = [priority_features[i] for i, selected in enumerate(selected_mask) if selected]
+            else:
+                self.selected_features = priority_features
+            
+        elif method == 'conservative':
+            # 분산 기반 사전 필터링
             from sklearn.feature_selection import VarianceThreshold
             var_threshold = VarianceThreshold(threshold=0.01)
             X_train_var = var_threshold.fit_transform(X_train)
@@ -324,152 +472,41 @@ class DataProcessor:
             var_features = X_train.columns[var_threshold.get_support()].tolist()
             print(f"분산 필터링 후 피처 수: {len(var_features)}")
             
-            # DataFrame 재구성
             X_train_filtered = pd.DataFrame(X_train_var, columns=var_features, index=X_train.index)
             X_test_filtered = pd.DataFrame(X_test_var, columns=var_features, index=X_test.index)
             
-            # 2. 상관관계 기반 중복 제거
+            # 상관관계 기반 중복 제거
             corr_matrix = X_train_filtered.corr().abs()
             upper_tri = corr_matrix.where(
                 np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
             )
             
-            # 0.95 이상 상관관계 피처 제거
             high_corr_features = [column for column in upper_tri.columns if any(upper_tri[column] > 0.95)]
-            
             remaining_features = [f for f in var_features if f not in high_corr_features]
-            print(f"상관관계 필터링 후 피처 수: {len(remaining_features)}")
             
-            X_train_corr = X_train_filtered[remaining_features]
-            X_test_corr = X_test_filtered[remaining_features]
-            
-            # 3. 안정적인 피처 선택 방법 조합
             if len(remaining_features) > k:
-                # F-test와 mutual_info의 교집합 사용
-                from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
+                from sklearn.feature_selection import SelectKBest, f_classif
+                selector = SelectKBest(f_classif, k=k)
                 
-                # 더 많은 피처를 선택한 후 교집합 구하기
-                k_extended = min(k * 2, len(remaining_features))
-                
-                # F-test 기반 선택
-                f_selector = SelectKBest(f_classif, k=k_extended)
-                f_selector.fit(X_train_corr, y_train)
-                f_features = X_train_corr.columns[f_selector.get_support()].tolist()
-                
-                # Mutual Info 기반 선택 (샘플링으로 안정성 확보)
-                sample_size = min(5000, len(X_train_corr))
-                sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
-                    len(X_train_corr), sample_size, replace=False
-                )
-                X_sample = X_train_corr.iloc[sample_idx]
-                y_sample = y_train.iloc[sample_idx]
-                
-                mi_selector = SelectKBest(mutual_info_classif, k=k_extended)
-                mi_selector.fit(X_sample, y_sample)
-                mi_features = X_train_corr.columns[mi_selector.get_support()].tolist()
-                
-                # 교집합 구하기
-                common_features = list(set(f_features) & set(mi_features))
-                
-                # 교집합이 충분하지 않으면 F-test 결과 우선 사용
-                if len(common_features) < k:
-                    print(f"교집합 피처 수 부족 ({len(common_features)}), F-test 결과 사용")
-                    selected_features = f_features[:k]
+                if len(X_train) > 5000:
+                    sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
+                        len(X_train), 5000, replace=False
+                    )
+                    X_sample = X_train_filtered[remaining_features].iloc[sample_idx]
+                    y_sample = y_train.iloc[sample_idx]
+                    selector.fit(X_sample, y_sample)
+                    del X_sample, y_sample
                 else:
-                    # 교집합에서 k개 선택 (F-test 점수 기준)
-                    f_scores = f_selector.scores_
-                    f_feature_scores = dict(zip(X_train_corr.columns, f_scores))
-                    
-                    common_scores = [(f, f_feature_scores[f]) for f in common_features]
-                    common_scores.sort(key=lambda x: x[1], reverse=True)
-                    
-                    selected_features = [f for f, _ in common_scores[:k]]
+                    selector.fit(X_train_filtered[remaining_features], y_train)
                 
-                self.selected_features = selected_features
-                
+                selected_mask = selector.get_support()
+                self.selected_features = [remaining_features[i] for i, selected in enumerate(selected_mask) if selected]
             else:
                 self.selected_features = remaining_features
-            
-        elif method == 'mutual_info':
-            selector = SelectKBest(mutual_info_classif, k=k)
-        elif method == 'f_classif':
-            selector = SelectKBest(f_classif, k=k)
-        elif method == 'random_forest':
-            # 메모리 효율적 RF 피처 선택
-            rf = RandomForestClassifier(
-                n_estimators=50,  # 메모리 절약
-                random_state=Config.RANDOM_STATE,
-                n_jobs=1,
-                max_depth=5
-            )
-            
-            # 샘플링으로 피팅
-            if len(X_train) > 5000:
-                sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
-                    len(X_train), 5000, replace=False
-                )
-                X_sample = X_train.iloc[sample_idx]
-                y_sample = y_train.iloc[sample_idx]
-                rf.fit(X_sample, y_sample)
-                del X_sample, y_sample
-            else:
-                rf.fit(X_train, y_train)
-            
-            importances = rf.feature_importances_
-            indices = np.argsort(importances)[::-1][:k]
-            
-            X_train_selected = X_train.iloc[:, indices].copy()
-            X_test_selected = X_test.iloc[:, indices].copy()
-            self.selected_features = X_train.columns[indices].tolist()
-            
-            print(f"선택된 피처 개수: {len(self.selected_features)}")
-            
-            # 메모리 정리
-            del rf
-            gc.collect()
-            
-            return X_train_selected, X_test_selected
-        else:
-            selector = SelectKBest(mutual_info_classif, k=k)
         
-        if method != 'conservative':
-            # 샘플링으로 피처 선택
-            if len(X_train) > 5000 and method in ['mutual_info', 'f_classif']:
-                sample_idx = np.random.RandomState(Config.RANDOM_STATE).choice(
-                    len(X_train), 5000, replace=False
-                )
-                X_sample = X_train.iloc[sample_idx]
-                y_sample = y_train.iloc[sample_idx]
-                selector.fit(X_sample, y_sample)
-                del X_sample, y_sample
-            else:
-                selector.fit(X_train, y_train)
-            
-            X_train_selected = selector.transform(X_train)
-            X_test_selected = selector.transform(X_test)
-            
-            selected_mask = selector.get_support()
-            self.selected_features = X_train.columns[selected_mask].tolist()
-            
-            X_train_selected = pd.DataFrame(
-                X_train_selected, 
-                columns=self.selected_features, 
-                index=X_train.index,
-                dtype='float32'
-            )
-            X_test_selected = pd.DataFrame(
-                X_test_selected, 
-                columns=self.selected_features, 
-                index=X_test.index,
-                dtype='float32'
-            )
-            
-            self.feature_selector = selector
-            save_joblib(self.feature_selector, Config.FEATURE_SELECTOR_FILE)
-        else:
-            # 보수적 방법의 경우
-            X_train_selected = X_train[self.selected_features].copy()
-            X_test_selected = X_test[self.selected_features].copy()
+        # 선택된 피처로 데이터 구성
+        X_train_selected = X_train[self.selected_features].copy()
+        X_test_selected = X_test[self.selected_features].copy()
         
         print(f"선택된 피처 개수: {len(self.selected_features)}")
         
@@ -500,12 +537,12 @@ class DataProcessor:
             # 3. 스케일링
             X_train, X_test = self.scale_features(X_train, X_test, scaling_method)
             
-            # 4. 피처 선택 (보수적 방법 사용)
+            # 4. 피처 선택
             if use_feature_selection:
-                available_features = min(25, X_train.shape[1])  # 더 적은 피처 선택
+                available_features = min(40, X_train.shape[1])
                 X_train, X_test = self.select_features(
                     X_train, X_test, y_train, 
-                    method='conservative',  # 보수적 피처 선택 사용
+                    method='domain_based',
                     k=available_features
                 )
             
@@ -535,6 +572,5 @@ class DataProcessor:
             
         except Exception as e:
             print(f"데이터 전처리 중 오류 발생: {e}")
-            # 메모리 정리
             gc.collect()
             raise
