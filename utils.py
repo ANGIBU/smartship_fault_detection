@@ -151,7 +151,6 @@ def save_model(model, file_path):
         
     except Exception as e:
         print(f"모델 저장 실패: {e}")
-        # 저장에 실패해도 프로그램이 중단되지 않도록 경고만 출력
         print("경고: 모델 저장에 실패했지만 프로그램을 계속 진행합니다.")
 
 def load_model(file_path):

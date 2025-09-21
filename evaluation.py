@@ -12,7 +12,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from config import Config
-from utils import timer, calculate_all_metrics, print_confusion_matrix, save_results
+from utils import timer, calculate_all_metrics, save_results
 
 class ModelEvaluator:
     def __init__(self):
@@ -50,6 +50,9 @@ class ModelEvaluator:
         # 클래스 불균형 분석
         imbalance_metrics = self._analyze_class_imbalance(y_test, y_pred)
         
+        # 시간 기반 성능 분석
+        temporal_metrics = self._analyze_temporal_performance(y_test, y_pred)
+        
         # 결과 저장
         evaluation_result = {
             'model_name': model_name,
@@ -58,6 +61,7 @@ class ModelEvaluator:
             'confusion_metrics': confusion_metrics,
             'probability_metrics': prob_metrics,
             'imbalance_metrics': imbalance_metrics,
+            'temporal_metrics': temporal_metrics,
             'predictions': y_pred,
             'probabilities': y_proba
         }
@@ -186,12 +190,16 @@ class ModelEvaluator:
         # 확률 보정 분석
         calibration_metrics = self._analyze_calibration(y_true, y_proba)
         
+        # 엔트로피 기반 불확실성 분석
+        entropy_analysis = self._analyze_prediction_entropy(y_proba)
+        
         return {
             'max_probabilities': max_proba.tolist(),
             'mean_max_probability': float(np.mean(max_proba)),
             'confidence_analysis': confidence_analysis,
             'class_avg_probabilities': class_proba_avg,
-            'calibration_metrics': calibration_metrics
+            'calibration_metrics': calibration_metrics,
+            'entropy_analysis': entropy_analysis
         }
     
     def _analyze_calibration(self, y_true, y_proba):
@@ -235,6 +243,45 @@ class ModelEvaluator:
             print(f"보정 분석 실패: {e}")
             return {}
     
+    def _analyze_prediction_entropy(self, y_proba):
+        """예측 엔트로피 분석"""
+        try:
+            # 엔트로피 계산
+            entropies = []
+            for i in range(len(y_proba)):
+                probs = y_proba[i]
+                entropy = -np.sum(probs * np.log(probs + 1e-10))
+                entropies.append(entropy)
+            
+            entropies = np.array(entropies)
+            
+            # 엔트로피 통계
+            entropy_stats = {
+                'mean_entropy': float(np.mean(entropies)),
+                'std_entropy': float(np.std(entropies)),
+                'min_entropy': float(np.min(entropies)),
+                'max_entropy': float(np.max(entropies))
+            }
+            
+            # 엔트로피 구간별 분포
+            entropy_bins = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+            bin_counts = np.histogram(entropies, bins=entropy_bins)[0]
+            
+            entropy_distribution = {}
+            for i in range(len(entropy_bins)-1):
+                bin_name = f"{entropy_bins[i]:.1f}-{entropy_bins[i+1]:.1f}"
+                entropy_distribution[bin_name] = int(bin_counts[i])
+            
+            return {
+                'entropy_stats': entropy_stats,
+                'entropy_distribution': entropy_distribution,
+                'entropies': entropies.tolist()
+            }
+            
+        except Exception as e:
+            print(f"엔트로피 분석 실패: {e}")
+            return {}
+    
     def _analyze_class_imbalance(self, y_true, y_pred):
         """클래스 불균형 분석"""
         # 실제 분포
@@ -263,6 +310,16 @@ class ModelEvaluator:
         missing_true_classes = np.where(true_counts == 0)[0].tolist()
         missing_pred_classes = np.where(pred_counts == 0)[0].tolist()
         
+        # 과소/과대 예측된 클래스
+        over_predicted = []
+        under_predicted = []
+        
+        for i in range(Config.N_CLASSES):
+            if pred_counts[i] > true_counts[i] * 1.5:  # 50% 이상 과대 예측
+                over_predicted.append(i)
+            elif pred_counts[i] < true_counts[i] * 0.5:  # 50% 이상 과소 예측
+                under_predicted.append(i)
+        
         return {
             'true_distribution': true_distribution.tolist(),
             'pred_distribution': pred_distribution.tolist(),
@@ -271,8 +328,65 @@ class ModelEvaluator:
             'pred_imbalance_ratio': float(pred_imbalance_ratio),
             'missing_true_classes': missing_true_classes,
             'missing_pred_classes': missing_pred_classes,
+            'over_predicted_classes': over_predicted,
+            'under_predicted_classes': under_predicted,
             'total_samples': total_samples
         }
+    
+    def _analyze_temporal_performance(self, y_true, y_pred):
+        """시간적 성능 분석"""
+        try:
+            # 시간 순서대로 성능 변화 분석
+            window_size = max(100, len(y_true) // 10)  # 최소 100개 또는 전체의 10%
+            performance_over_time = []
+            
+            for i in range(0, len(y_true) - window_size + 1, window_size // 2):
+                end_idx = min(i + window_size, len(y_true))
+                window_true = y_true[i:end_idx]
+                window_pred = y_pred[i:end_idx]
+                
+                window_f1 = f1_score(window_true, window_pred, average='macro', zero_division=0)
+                window_acc = accuracy_score(window_true, window_pred)
+                
+                performance_over_time.append({
+                    'start_idx': i,
+                    'end_idx': end_idx,
+                    'f1_score': float(window_f1),
+                    'accuracy': float(window_acc)
+                })
+            
+            # 성능 변화 트렌드 분석
+            if len(performance_over_time) > 1:
+                f1_scores = [p['f1_score'] for p in performance_over_time]
+                
+                # 선형 트렌드 계산
+                x = np.arange(len(f1_scores))
+                trend_slope = np.polyfit(x, f1_scores, 1)[0]
+                
+                # 성능 안정성 (표준편차)
+                f1_stability = np.std(f1_scores)
+                
+                temporal_analysis = {
+                    'performance_over_time': performance_over_time,
+                    'trend_slope': float(trend_slope),
+                    'stability': float(f1_stability),
+                    'mean_performance': float(np.mean(f1_scores)),
+                    'performance_range': float(np.max(f1_scores) - np.min(f1_scores))
+                }
+            else:
+                temporal_analysis = {
+                    'performance_over_time': performance_over_time,
+                    'trend_slope': 0.0,
+                    'stability': 0.0,
+                    'mean_performance': 0.0,
+                    'performance_range': 0.0
+                }
+            
+            return temporal_analysis
+            
+        except Exception as e:
+            print(f"시간적 성능 분석 실패: {e}")
+            return {}
     
     def _print_evaluation_summary(self, evaluation_result):
         """평가 결과 요약 출력"""
@@ -308,6 +422,10 @@ class ModelEvaluator:
             prob_metrics = evaluation_result['probability_metrics']
             mean_confidence = prob_metrics['mean_max_probability']
             print(f"평균 예측 신뢰도: {mean_confidence:.4f}")
+            
+            if 'entropy_analysis' in prob_metrics:
+                entropy_stats = prob_metrics['entropy_analysis']['entropy_stats']
+                print(f"평균 예측 엔트로피: {entropy_stats['mean_entropy']:.4f}")
         
         # 클래스 불균형 정보
         imbalance_metrics = evaluation_result['imbalance_metrics']
@@ -316,6 +434,21 @@ class ModelEvaluator:
             pred_ratio = imbalance_metrics['pred_imbalance_ratio']
             print(f"실제 불균형 비율: {true_ratio:.2f}:1")
             print(f"예측 불균형 비율: {pred_ratio:.2f}:1")
+            
+            over_pred = imbalance_metrics['over_predicted_classes']
+            under_pred = imbalance_metrics['under_predicted_classes']
+            if over_pred:
+                print(f"과대 예측된 클래스: {over_pred}")
+            if under_pred:
+                print(f"과소 예측된 클래스: {under_pred}")
+        
+        # 시간적 성능
+        temporal_metrics = evaluation_result.get('temporal_metrics', {})
+        if temporal_metrics:
+            trend_slope = temporal_metrics.get('trend_slope', 0)
+            stability = temporal_metrics.get('stability', 0)
+            print(f"성능 트렌드: {'향상' if trend_slope > 0.001 else '악화' if trend_slope < -0.001 else '안정'}")
+            print(f"성능 안정성: {stability:.4f}")
     
     @timer
     def compare_models(self, model_results):
@@ -326,28 +459,42 @@ class ModelEvaluator:
         
         for model_name, result in model_results.items():
             metrics = result['basic_metrics']
-            comparison_data.append({
-                'model': model_name,
-                'accuracy': metrics['accuracy'],
-                'macro_f1': metrics['macro_f1'],
-                'weighted_f1': metrics['weighted_f1'],
-                'macro_precision': metrics['macro_precision'],
-                'macro_recall': metrics['macro_recall']
-            })
+            row = {'model': model_name}
+            row.update(metrics)
+            
+            # 추가 메트릭
+            if result.get('probability_metrics'):
+                prob_metrics = result['probability_metrics']
+                row['mean_confidence'] = prob_metrics['mean_max_probability']
+                
+                if 'entropy_analysis' in prob_metrics:
+                    entropy_stats = prob_metrics['entropy_analysis']['entropy_stats']
+                    row['mean_entropy'] = entropy_stats['mean_entropy']
+            
+            if result.get('imbalance_metrics'):
+                imbalance_metrics = result['imbalance_metrics']
+                row['pred_imbalance_ratio'] = imbalance_metrics['pred_imbalance_ratio']
+            
+            if result.get('temporal_metrics'):
+                temporal_metrics = result['temporal_metrics']
+                row['performance_stability'] = temporal_metrics.get('stability', 0)
+            
+            comparison_data.append(row)
         
-        comparison_df = pd.DataFrame(comparison_data)
-        comparison_df = comparison_df.sort_values('macro_f1', ascending=False)
+        if comparison_data:
+            comparison_df = pd.DataFrame(comparison_data)
+            comparison_df = comparison_df.sort_values('macro_f1', ascending=False)
+            
+            print(f"\n모델별 성능 순위:")
+            print(comparison_df.to_string(index=False, float_format='%.4f'))
+            
+            # 최고 성능 모델
+            if not comparison_df.empty:
+                best_model = comparison_df.iloc[0]
+                print(f"\n최고 성능 모델: {best_model['model']}")
+                print(f"Macro F1 Score: {best_model['macro_f1']:.4f}")
         
-        print(f"\n모델별 성능 순위:")
-        print(comparison_df.to_string(index=False, float_format='%.4f'))
-        
-        # 최고 성능 모델
-        if not comparison_df.empty:
-            best_model = comparison_df.iloc[0]
-            print(f"\n최고 성능 모델: {best_model['model']}")
-            print(f"Macro F1 Score: {best_model['macro_f1']:.4f}")
-        
-        return comparison_df
+        return comparison_df if comparison_data else None
     
     @timer
     def analyze_class_performance(self, evaluation_result):
@@ -381,7 +528,7 @@ class ModelEvaluator:
             print(f"최소: {valid_classes['f1_score'].min():.4f}")
             
             # 성능이 낮은 클래스 식별
-            low_performance_threshold = 0.6
+            low_performance_threshold = Config.CLASS_PERFORMANCE_THRESHOLD
             low_performance_classes = valid_classes[valid_classes['f1_score'] < low_performance_threshold]
             
             if not low_performance_classes.empty:
@@ -452,6 +599,21 @@ class ModelEvaluator:
             percentage = analysis['percentage']
             accuracy = analysis['accuracy']
             print(f"{threshold:6.2f} {count:8d} {percentage:7.1f} {accuracy:8.4f}")
+        
+        # 엔트로피 분석
+        if 'entropy_analysis' in prob_metrics:
+            entropy_analysis = prob_metrics['entropy_analysis']
+            entropy_stats = entropy_analysis['entropy_stats']
+            
+            print(f"\n예측 불확실성 분석:")
+            print(f"평균 엔트로피: {entropy_stats['mean_entropy']:.4f}")
+            print(f"엔트로피 표준편차: {entropy_stats['std_entropy']:.4f}")
+            
+            entropy_distribution = entropy_analysis['entropy_distribution']
+            print(f"\n엔트로피 구간별 분포:")
+            for bin_name, count in entropy_distribution.items():
+                percentage = count / len(prob_metrics['max_probabilities']) * 100
+                print(f"  {bin_name}: {count:4d}개 ({percentage:5.1f}%)")
         
         # 보정 분석
         calibration_metrics = prob_metrics.get('calibration_metrics', {})
@@ -527,6 +689,11 @@ class ModelEvaluator:
                         f"임계값 {threshold}: {count}개 ({percentage:.1f}%), "
                         f"정확도 {accuracy:.4f}"
                     )
+            
+            # 엔트로피 분석 추가
+            if 'entropy_analysis' in prob_metrics:
+                entropy_stats = prob_metrics['entropy_analysis']['entropy_stats']
+                report_lines.append(f"평균 예측 엔트로피: {entropy_stats['mean_entropy']:.4f}")
         
         # 5. 클래스 불균형 분석
         imbalance_metrics = evaluation_result.get('imbalance_metrics')
@@ -542,6 +709,29 @@ class ModelEvaluator:
             missing_pred = imbalance_metrics['missing_pred_classes']
             if missing_pred:
                 report_lines.append(f"예측되지 않은 클래스: {missing_pred}")
+            
+            over_pred = imbalance_metrics['over_predicted_classes']
+            under_pred = imbalance_metrics['under_predicted_classes']
+            if over_pred:
+                report_lines.append(f"과대 예측된 클래스: {over_pred}")
+            if under_pred:
+                report_lines.append(f"과소 예측된 클래스: {under_pred}")
+        
+        # 6. 시간적 성능 분석
+        temporal_metrics = evaluation_result.get('temporal_metrics')
+        if temporal_metrics:
+            report_lines.append(f"\n6. 시간적 성능 분석")
+            report_lines.append("-" * 30)
+            
+            trend_slope = temporal_metrics.get('trend_slope', 0)
+            stability = temporal_metrics.get('stability', 0)
+            mean_perf = temporal_metrics.get('mean_performance', 0)
+            
+            report_lines.append(f"평균 성능: {mean_perf:.4f}")
+            report_lines.append(f"성능 안정성: {stability:.4f}")
+            
+            trend_desc = "향상" if trend_slope > 0.001 else "악화" if trend_slope < -0.001 else "안정"
+            report_lines.append(f"성능 트렌드: {trend_desc}")
         
         # 보고서 텍스트 생성
         report_text = "\n".join(report_lines)
@@ -579,10 +769,20 @@ class ModelEvaluator:
             if result.get('probability_metrics'):
                 prob_metrics = result['probability_metrics']
                 row['mean_confidence'] = prob_metrics['mean_max_probability']
+                
+                if 'entropy_analysis' in prob_metrics:
+                    entropy_stats = prob_metrics['entropy_analysis']['entropy_stats']
+                    row['mean_entropy'] = entropy_stats['mean_entropy']
+                    row['entropy_std'] = entropy_stats['std_entropy']
             
             if result.get('imbalance_metrics'):
                 imbalance_metrics = result['imbalance_metrics']
                 row['pred_imbalance_ratio'] = imbalance_metrics['pred_imbalance_ratio']
+            
+            if result.get('temporal_metrics'):
+                temporal_metrics = result['temporal_metrics']
+                row['performance_stability'] = temporal_metrics.get('stability', 0)
+                row['performance_trend'] = temporal_metrics.get('trend_slope', 0)
             
             all_results.append(row)
         
@@ -689,18 +889,33 @@ class ModelEvaluator:
                 mean_conf = best_result['probability_metrics']['mean_max_probability']
                 if mean_conf >= 0.8:
                     recommendation['key_strengths'].append("높은 예측 신뢰도")
+                
+                if 'entropy_analysis' in best_result['probability_metrics']:
+                    entropy_stats = best_result['probability_metrics']['entropy_analysis']['entropy_stats']
+                    if entropy_stats['mean_entropy'] < 1.0:
+                        recommendation['key_strengths'].append("낮은 예측 불확실성")
+            
+            if best_result.get('temporal_metrics'):
+                stability = best_result['temporal_metrics'].get('stability', 1.0)
+                if stability < 0.05:
+                    recommendation['key_strengths'].append("높은 시간적 안정성")
             
             # 우려사항 분석
             if best_result.get('imbalance_metrics'):
                 missing_classes = best_result['imbalance_metrics']['missing_pred_classes']
                 if missing_classes:
                     recommendation['potential_concerns'].append(f"예측되지 않은 클래스: {len(missing_classes)}개")
+                
+                over_pred = best_result['imbalance_metrics']['over_predicted_classes']
+                under_pred = best_result['imbalance_metrics']['under_predicted_classes']
+                if len(over_pred) + len(under_pred) > 5:
+                    recommendation['potential_concerns'].append("다수 클래스의 불균형 예측")
             
             class_metrics = best_result.get('class_metrics', [])
             valid_classes = [cm for cm in class_metrics if cm['support'] > 0]
             if valid_classes:
                 f1_scores = [cm['f1_score'] for cm in valid_classes]
-                low_performance_count = sum(1 for score in f1_scores if score < 0.6)
+                low_performance_count = sum(1 for score in f1_scores if score < Config.CLASS_PERFORMANCE_THRESHOLD)
                 if low_performance_count > len(f1_scores) * 0.3:
                     recommendation['potential_concerns'].append("다수 클래스의 낮은 성능")
             
