@@ -135,7 +135,7 @@ class Prediction:
         return self.predictions
     
     def _optimization_based_balancing(self, current_counts, target_distribution):
-        """최적화 기반 균형 조정"""
+        """기반 균형 조정"""
         balanced_predictions = self.predictions.copy()
         
         # 각 샘플의 클래스 변경 비용 계산
@@ -472,7 +472,7 @@ class Prediction:
             'timestamp': pd.Timestamp.now(),
             'predictions': predictions.copy(),
             'distribution': np.bincount(predictions, minlength=Config.N_CLASSES),
-            'method': 'optimized_balanced' if apply_balancing else 'raw',
+            'method': 'balanced' if apply_balancing else 'raw',
             'balance_score': distribution_info['balance_score'] if distribution_info else 0.0
         })
         
@@ -522,6 +522,7 @@ class Prediction:
                         'class': class_id,
                         'accuracy': accuracy,
                         'f1': f1,
+                        'f1_score': f1,  # 두 키 모두 제공
                         'precision': precision,
                         'recall': recall,
                         'support': np.sum(class_mask)

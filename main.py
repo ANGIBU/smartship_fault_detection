@@ -252,7 +252,7 @@ def main():
                 print(f"보수적 성능 예측: {conservative_estimate:.4f}")
                 print(f"목표 성능 (0.80)까지: {0.80 - conservative_estimate:.4f}점 필요")
                 
-                # 성능 개선 방향 제시
+                # 성능 방향 제시
                 if conservative_estimate < 0.65:
                     print("권장사항: 피처 엔지니어링 및 데이터 품질 점검")
                 elif conservative_estimate < 0.72:
@@ -262,20 +262,31 @@ def main():
                 else:
                     print("권장사항: 현재 접근 방법 유지")
         
-        # 클래스별 성능 분석
+        # 클래스별 성능 분석 (안전한 접근 방식)
         if 'time_based' in prediction_results:
             time_metrics = prediction_results['time_based']['metrics']
-            if 'class_metrics' in time_metrics:
+            if time_metrics and 'class_metrics' in time_metrics:
                 class_metrics = time_metrics['class_metrics']
-                low_performance_classes = [cm for cm in class_metrics if cm['f1_score'] < 0.4]
-                
-                if low_performance_classes:
-                    print(f"\n성능이 낮은 클래스 ({len(low_performance_classes)}개):")
-                    for cm in low_performance_classes[:5]:
-                        print(f"  클래스 {cm['class']:2d}: F1={cm['f1_score']:.3f}, 지원={cm['support']:4d}")
+                if class_metrics and len(class_metrics) > 0:
+                    # 안전한 키 접근
+                    low_performance_classes = []
+                    for cm in class_metrics:
+                        if isinstance(cm, dict):
+                            # 다양한 키 패턴 시도
+                            f1_score = cm.get('f1_score', cm.get('f1', cm.get('f1_score', 0)))
+                            if f1_score < 0.4:
+                                low_performance_classes.append(cm)
                     
-                    if len(low_performance_classes) > 5:
-                        print(f"  ... (총 {len(low_performance_classes)}개)")
+                    if low_performance_classes:
+                        print(f"\n성능이 낮은 클래스 ({len(low_performance_classes)}개):")
+                        for i, cm in enumerate(low_performance_classes[:5]):
+                            class_id = cm.get('class', i)
+                            f1_score = cm.get('f1_score', cm.get('f1', 0))
+                            support = cm.get('support', 0)
+                            print(f"  클래스 {class_id:2d}: F1={f1_score:.3f}, 지원={support:4d}")
+                        
+                        if len(low_performance_classes) > 5:
+                            print(f"  ... (총 {len(low_performance_classes)}개)")
         
         # 시스템 리소스 사용량 분석
         final_memory = memory_usage_check()
