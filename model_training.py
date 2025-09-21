@@ -547,12 +547,12 @@ class ModelTraining:
                 
             except Exception as e:
                 print(f"스태킹 앙상블 실패: {e}")
-                return self._create_weighted_ensemble(good_models)
+                return self._create_weighted_ensemble(good_models, X_train, y_train)
         else:
             print("앙상블을 위한 충분한 모델이 없음")
             return None
     
-    def _create_weighted_ensemble(self, good_models):
+    def _create_weighted_ensemble(self, good_models, X_train, y_train):
         """가중치 기반 앙상블 생성"""
         print("가중치 기반 앙상블 생성")
         
@@ -572,9 +572,9 @@ class ModelTraining:
                 weights=model_weights
             )
             
-            # 샘플 데이터로 앙상블 훈련 검증
-            sample_size = min(5000, len(X_train)) if 'X_train' in locals() else 1000
-            print("가중치 앙상블 생성 완료")
+            # 샘플 데이터로 앙상블 검증
+            sample_size = min(5000, len(X_train))
+            print(f"가중치 앙상블 생성 완료 (검증 샘플: {sample_size}개)")
             
             return weighted_ensemble
             
