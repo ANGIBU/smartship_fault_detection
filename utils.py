@@ -77,16 +77,82 @@ def save_model(model, file_path):
         
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # 메모리 효율적 저장
-        with open(file_path, 'wb') as f:
-            pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
+        # 먼저 joblib로 시도
+        try:
+            joblib.dump(model, file_path, compress=3)
+            print(f"모델 저장 완료 (joblib): {file_path}")
+            return
+        except Exception as joblib_error:
+            print(f"joblib 저장 실패: {joblib_error}")
         
-        # 파일 크기 확인
-        file_size_mb = file_path.stat().st_size / (1024 * 1024)
-        print(f"모델 저장 완료: {file_path} ({file_size_mb:.1f}MB)")
+        # joblib 실패시 pickle로 시도
+        try:
+            with open(file_path, 'wb') as f:
+                pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            # 파일 크기 확인
+            file_size_mb = file_path.stat().st_size / (1024 * 1024)
+            print(f"모델 저장 완료 (pickle): {file_path} ({file_size_mb:.1f}MB)")
+            
+        except Exception as pickle_error:
+            print(f"pickle 저장 실패: {pickle_error}")
+            
+            # 특수한 경우: 앙상블 모델일 때
+            if hasattr(model, 'estimators_'):
+                print("앙상블 모델 감지, 개별 저장 시도")
+                try:
+                    # 개별 모델들 저장
+                    estimators_data = []
+                    for name, estimator in model.estimators_:
+                        estimator_path = file_path.parent / f"{name}_estimator.pkl"
+                        try:
+                            joblib.dump(estimator, estimator_path, compress=3)
+                            estimators_data.append((name, str(estimator_path)))
+                            print(f"개별 모델 저장: {name}")
+                        except Exception as est_error:
+                            print(f"개별 모델 저장 실패 {name}: {est_error}")
+                    
+                    # 메타 정보 저장
+                    meta_info = {
+                        'model_type': type(model).__name__,
+                        'estimators': estimators_data,
+                        'voting': getattr(model, 'voting', 'soft'),
+                        'weights': getattr(model, 'weights', None)
+                    }
+                    
+                    meta_path = file_path.parent / 'ensemble_meta.pkl'
+                    with open(meta_path, 'wb') as f:
+                        pickle.dump(meta_info, f)
+                    
+                    print(f"앙상블 메타 정보 저장: {meta_path}")
+                    return
+                    
+                except Exception as ensemble_error:
+                    print(f"앙상블 개별 저장 실패: {ensemble_error}")
+            
+            # 마지막 시도: 모델 상태만 저장
+            try:
+                model_state = {
+                    'model_type': type(model).__name__,
+                    'model_params': getattr(model, 'get_params', lambda: {})(),
+                    'classes_': getattr(model, 'classes_', None),
+                    'n_classes_': getattr(model, 'n_classes_', None)
+                }
+                
+                state_path = file_path.parent / 'model_state.pkl'
+                with open(state_path, 'wb') as f:
+                    pickle.dump(model_state, f)
+                
+                print(f"모델 상태 저장: {state_path}")
+                
+            except Exception as state_error:
+                print(f"모델 상태 저장도 실패: {state_error}")
+                raise Exception(f"모든 저장 방법 실패: pickle={pickle_error}, joblib={joblib_error}")
         
     except Exception as e:
-        raise Exception(f"모델 저장 실패: {e}")
+        print(f"모델 저장 실패: {e}")
+        # 저장에 실패해도 프로그램이 중단되지 않도록 경고만 출력
+        print("경고: 모델 저장에 실패했지만 프로그램을 계속 진행합니다.")
 
 def load_model(file_path):
     """모델 로드"""
@@ -97,11 +163,53 @@ def load_model(file_path):
         if not file_path.exists():
             raise FileNotFoundError(f"모델 파일을 찾을 수 없습니다: {file_path}")
         
-        with open(file_path, 'rb') as f:
-            model = pickle.load(f)
+        # 먼저 joblib로 시도
+        try:
+            model = joblib.load(file_path)
+            print(f"모델 로드 완료 (joblib): {file_path}")
+            return model
+        except:
+            pass
         
-        print(f"모델 로드 완료: {file_path}")
-        return model
+        # joblib 실패시 pickle로 시도
+        try:
+            with open(file_path, 'rb') as f:
+                model = pickle.load(f)
+            print(f"모델 로드 완료 (pickle): {file_path}")
+            return model
+        except:
+            pass
+        
+        # 앙상블 메타 정보 확인
+        meta_path = file_path.parent / 'ensemble_meta.pkl'
+        if meta_path.exists():
+            print("앙상블 메타 정보 발견, 재구성 시도")
+            try:
+                with open(meta_path, 'rb') as f:
+                    meta_info = pickle.load(f)
+                
+                estimators = []
+                for name, estimator_path in meta_info['estimators']:
+                    try:
+                        estimator = joblib.load(estimator_path)
+                        estimators.append((name, estimator))
+                    except:
+                        print(f"개별 모델 로드 실패: {name}")
+                
+                if estimators:
+                    from sklearn.ensemble import VotingClassifier
+                    model = VotingClassifier(
+                        estimators=estimators,
+                        voting=meta_info.get('voting', 'soft'),
+                        weights=meta_info.get('weights')
+                    )
+                    print("앙상블 모델 재구성 완료")
+                    return model
+            except Exception as e:
+                print(f"앙상블 재구성 실패: {e}")
+        
+        raise Exception("모든 로드 방법 실패")
+        
     except Exception as e:
         raise Exception(f"모델 로드 실패: {e}")
 

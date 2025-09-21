@@ -18,6 +18,19 @@ warnings.filterwarnings('ignore')
 from config import Config
 from utils import timer, calculate_macro_f1, save_model, save_joblib, setup_logging
 
+class WeightedVotingClassifier(VotingClassifier):
+    """가중치 기반 보팅 분류기"""
+    def __init__(self, estimators, voting='soft', weights=None):
+        super().__init__(estimators, voting=voting, weights=weights)
+        self.model_weights = weights
+    
+    def predict_proba(self, X):
+        if self.voting == 'hard':
+            raise AttributeError("predict_proba is not available when voting='hard'")
+        
+        avg = np.average(self._collect_probas(X), axis=0, weights=self.model_weights)
+        return avg
+
 class ModelTraining:
     def __init__(self):
         self.models = {}
@@ -106,21 +119,11 @@ class ModelTraining:
                         X_train, y_train, 
                         sample_weight=sample_weights,
                         eval_set=[(X_val, y_val)],
-                        early_stopping_rounds=50,
                         verbose=False
                     )
                 except (TypeError, ValueError) as e:
-                    print(f"XGBoost 새 방식 실패, 이전 방식 시도: {e}")
-                    try:
-                        model.fit(
-                            X_train, y_train, 
-                            sample_weight=sample_weights,
-                            eval_set=[(X_val, y_val)],
-                            verbose=False
-                        )
-                    except Exception as e2:
-                        print(f"XGBoost 검증 세트 사용 실패, 단순 훈련: {e2}")
-                        model.fit(X_train, y_train, sample_weight=sample_weights)
+                    print(f"XGBoost 검증 세트 사용 실패, 단순 훈련: {e}")
+                    model.fit(X_train, y_train, sample_weight=sample_weights)
             else:
                 model.fit(X_train, y_train, sample_weight=sample_weights)
             
@@ -422,18 +425,6 @@ class ModelTraining:
             
             try:
                 # 가중치 기반 소프트 보팅
-                class WeightedVotingClassifier(VotingClassifier):
-                    def __init__(self, estimators, voting='soft', weights=None):
-                        super().__init__(estimators, voting=voting, weights=weights)
-                        self.model_weights = weights
-                    
-                    def predict_proba(self, X):
-                        if self.voting == 'hard':
-                            raise AttributeError("predict_proba is not available when voting='hard'")
-                        
-                        avg = np.average(self._collect_probas(X), axis=0, weights=self.model_weights)
-                        return avg
-                
                 weighted_ensemble = WeightedVotingClassifier(
                     estimators=good_models,
                     voting='soft',
@@ -560,8 +551,27 @@ class ModelTraining:
         
         # 최고 모델 저장
         if self.best_model is not None:
-            save_model(self.best_model, Config.MODEL_FILE)
-            print(f"최고 모델 저장: {type(self.best_model).__name__}")
+            try:
+                save_model(self.best_model, Config.MODEL_FILE)
+                print(f"최고 모델 저장: {type(self.best_model).__name__}")
+            except Exception as e:
+                print(f"모델 저장 실패: {e}")
+                print("개별 모델 저장 시도")
+                
+                # 개별 모델 저장 시도
+                for model_name, model in self.models.items():
+                    if model is not None and model_name not in ['weighted_ensemble', 'voting_ensemble']:
+                        try:
+                            model_path = Config.MODEL_DIR / f"{model_name}_model.pkl"
+                            save_model(model, model_path)
+                            print(f"{model_name} 모델 저장 완료")
+                            # 첫 번째 저장 가능한 모델을 최고 모델로 설정
+                            if self.best_model is ensemble:
+                                self.best_model = model
+                            break
+                        except Exception as e2:
+                            print(f"{model_name} 모델 저장 실패: {e2}")
+                            continue
         
         # CV 결과 저장
         if self.cv_scores:
@@ -659,7 +669,10 @@ class ModelTraining:
             
             if best_stable_model is not None:
                 print(f"최고 안정적인 모델 선택 완료, 안정성 점수: {best_score:.4f}")
-                save_model(best_stable_model, Config.MODEL_FILE)
+                try:
+                    save_model(best_stable_model, Config.MODEL_FILE)
+                except Exception as e:
+                    print(f"모델 저장 실패: {e}")
                 return stable_models, best_stable_model
         
         print("안정적인 모델 훈련 실패, 기존 모델 사용")
