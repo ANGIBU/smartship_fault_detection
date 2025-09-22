@@ -46,6 +46,12 @@ class Config:
     FOCAL_LOSS_ALPHA = 1.0
     FOCAL_LOSS_GAMMA = 2.0
     
+    # Quick mode settings
+    QUICK_MODE = False
+    QUICK_SAMPLE_SIZE = 1000
+    QUICK_FEATURE_COUNT = 15
+    QUICK_N_ESTIMATORS = 50
+    
     # LightGBM parameters
     LGBM_PARAMS = {
         'objective': 'multiclass',
@@ -67,6 +73,26 @@ class Config:
         'random_state': RANDOM_STATE,
         'n_estimators': 500,
         'n_jobs': N_JOBS,
+        'class_weight': 'balanced'
+    }
+    
+    # Quick LightGBM parameters
+    QUICK_LGBM_PARAMS = {
+        'objective': 'multiclass',
+        'num_class': N_CLASSES,
+        'metric': 'multi_logloss',
+        'boosting_type': 'gbdt',
+        'num_leaves': 15,
+        'learning_rate': 0.1,
+        'feature_fraction': 0.9,
+        'bagging_fraction': 0.9,
+        'bagging_freq': 1,
+        'min_child_samples': 10,
+        'max_depth': 4,
+        'verbose': -1,
+        'random_state': RANDOM_STATE,
+        'n_estimators': QUICK_N_ESTIMATORS,
+        'n_jobs': 1,
         'class_weight': 'balanced'
     }
     
@@ -165,6 +191,21 @@ class Config:
             directory.mkdir(parents=True, exist_ok=True)
     
     @classmethod
+    def setup_quick_mode(cls):
+        """Setup quick mode configuration"""
+        cls.QUICK_MODE = True
+        cls.TARGET_FEATURES = cls.QUICK_FEATURE_COUNT
+        cls.CV_FOLDS = 2
+        cls.VALIDATION_SIZE = 0.15
+        cls.USE_CLASS_WEIGHTS = False
+        cls.N_JOBS = 1
+        
+        print(f"Quick mode activated:")
+        print(f"  Sample size: {cls.QUICK_SAMPLE_SIZE}")
+        print(f"  Feature count: {cls.QUICK_FEATURE_COUNT}")
+        print(f"  Estimators: {cls.QUICK_N_ESTIMATORS}")
+    
+    @classmethod
     def get_model_params(cls, model_name):
         """Return model-specific parameters"""
         params_map = {
@@ -172,7 +213,8 @@ class Config:
             'xgboost': cls.XGB_PARAMS,
             'catboost': cls.CAT_PARAMS,
             'random_forest': cls.RF_PARAMS,
-            'extra_trees': cls.ET_PARAMS
+            'extra_trees': cls.ET_PARAMS,
+            'quick_lightgbm': cls.QUICK_LGBM_PARAMS
         }
         return params_map.get(model_name, {}).copy()
     
@@ -203,6 +245,12 @@ class Config:
     @classmethod
     def update_for_hardware(cls, available_memory_gb, cpu_cores):
         """Adjust settings for hardware specifications"""
+        if cls.QUICK_MODE:
+            # Quick mode uses minimal resources
+            cls.N_JOBS = 1
+            cls.CHUNK_SIZE = cls.QUICK_SAMPLE_SIZE
+            return
+        
         if available_memory_gb >= 32:
             cls.N_JOBS = min(cpu_cores, 8)
             cls.CHUNK_SIZE = 15000

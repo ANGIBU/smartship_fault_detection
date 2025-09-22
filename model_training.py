@@ -135,6 +135,38 @@ class ModelTraining:
             return None
     
     @timer
+    def train_quick_lightgbm(self, X_train, y_train):
+        """Train LightGBM model for quick mode"""
+        print("Starting quick LightGBM model training")
+        
+        try:
+            params = Config.get_model_params('quick_lightgbm')
+            
+            # Simple balanced weights for quick mode
+            if Config.USE_CLASS_WEIGHTS:
+                sample_weights, class_weight_dict = self._calculate_class_weights(y_train, method='balanced')
+                params['class_weight'] = class_weight_dict
+            else:
+                sample_weights = None
+            
+            model = lgb.LGBMClassifier(**params)
+            
+            if sample_weights is not None:
+                model.fit(X_train, y_train, sample_weight=sample_weights)
+            else:
+                model.fit(X_train, y_train)
+            
+            self.models['quick_lightgbm'] = model
+            self.best_model = model
+            
+            print("Quick LightGBM model training completed")
+            return model
+            
+        except Exception as e:
+            print(f"Error during quick LightGBM training: {e}")
+            return None
+    
+    @timer
     def train_xgboost(self, X_train, y_train, X_val=None, y_val=None, params=None):
         """Train XGBoost model"""
         print("Starting XGBoost model training")

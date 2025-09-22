@@ -6,6 +6,7 @@ import warnings
 import sys
 import time
 import psutil
+import argparse
 warnings.filterwarnings('ignore')
 
 from config import Config
@@ -340,6 +341,57 @@ def run_fast_mode():
         traceback.print_exc()
         raise
 
+def run_quick_mode():
+    """Quick test execution mode"""
+    print("=" * 50)
+    print("   Quick Test Mode")
+    print("=" * 50)
+    
+    try:
+        # Quick mode configuration
+        Config.setup_quick_mode()
+        Config.create_directories()
+        
+        print("Quick mode settings:")
+        print(f"  Sample size: {Config.QUICK_SAMPLE_SIZE}")
+        print(f"  Feature count: {Config.QUICK_FEATURE_COUNT}")
+        print(f"  Model: LightGBM only")
+        
+        # Quick data processing
+        processor = DataProcessor()
+        X_train, X_test, y_train, train_ids, test_ids = processor.get_quick_processed_data()
+        
+        print(f"Training data shape: {X_train.shape}")
+        print(f"Test data shape: {X_test.shape}")
+        
+        # Quick model training
+        trainer = ModelTraining()
+        model = trainer.train_quick_lightgbm(X_train, y_train)
+        
+        if model is not None:
+            print(f"Quick model trained: {type(model).__name__}")
+            
+            # Quick prediction
+            predictor = PredictionProcessor(model)
+            test_predictions = predictor.predict(X_test, use_calibrated=False)
+            
+            # Create submission
+            submission_df = predictor.create_submission_file(
+                test_ids, apply_balancing=False
+            )
+            
+            print(f"Quick test complete: {Config.RESULT_FILE}")
+            return model, submission_df
+        else:
+            print("Quick model training failed")
+            return None, None
+        
+    except Exception as e:
+        print(f"Error during quick execution: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
 def run_validation_mode():
     """Validation mode"""
     print("=" * 50)
@@ -393,18 +445,46 @@ def run_validation_mode():
         traceback.print_exc()
         raise
 
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Sensor Fault Detection System')
+    parser.add_argument('--quick', action='store_true', 
+                       help='Run quick test mode with minimal data')
+    parser.add_argument('--fast', action='store_true', 
+                       help='Run fast mode without optimization')
+    parser.add_argument('--validation', action='store_true', 
+                       help='Run validation mode')
+    
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Handle legacy command line arguments for backward compatibility
+    if len(sys.argv) > 1 and not any(arg.startswith('--') for arg in sys.argv[1:]):
         mode = sys.argv[1].lower()
         
-        if mode == "fast":
+        if mode == "quick":
+            run_quick_mode()
+        elif mode == "fast":
             run_fast_mode()
         elif mode == "validation":
             run_validation_mode()
         else:
             print("Usage:")
-            print("  python main.py           # Full execution")
-            print("  python main.py fast      # Fast execution")
-            print("  python main.py validation # Validation mode")
+            print("  python main.py                   # Full execution")
+            print("  python main.py --quick           # Quick test mode")
+            print("  python main.py --fast            # Fast execution")
+            print("  python main.py --validation      # Validation mode")
     else:
-        main()
+        # Handle new argument parsing
+        if args.quick:
+            run_quick_mode()
+        elif args.fast:
+            run_fast_mode()
+        elif args.validation:
+            run_validation_mode()
+        else:
+            # Default full execution
+            main()

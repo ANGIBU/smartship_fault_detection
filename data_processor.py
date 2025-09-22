@@ -60,6 +60,53 @@ class DataProcessor:
             print(f"Data loading failed: {e}")
             raise
     
+    @timer
+    def load_quick_data(self):
+        """Load data for quick mode"""
+        print("Loading data for quick mode")
+        
+        try:
+            train_df = pd.read_csv(Config.TRAIN_FILE)
+            test_df = pd.read_csv(Config.TEST_FILE)
+            
+            # Sample data for quick testing
+            if len(train_df) > Config.QUICK_SAMPLE_SIZE:
+                # Stratified sampling to maintain class distribution
+                sample_indices = []
+                for class_id in train_df[Config.TARGET_COLUMN].unique():
+                    class_data = train_df[train_df[Config.TARGET_COLUMN] == class_id]
+                    sample_size = min(len(class_data), Config.QUICK_SAMPLE_SIZE // Config.N_CLASSES)
+                    if sample_size > 0:
+                        sampled = class_data.sample(n=sample_size, random_state=Config.RANDOM_STATE)
+                        sample_indices.extend(sampled.index.tolist())
+                
+                train_df = train_df.loc[sample_indices].reset_index(drop=True)
+                print(f"Sampled training data: {len(train_df)} samples")
+            
+            # Sample test data
+            if len(test_df) > Config.QUICK_SAMPLE_SIZE:
+                test_df = test_df.sample(n=Config.QUICK_SAMPLE_SIZE, random_state=Config.RANDOM_STATE).reset_index(drop=True)
+                print(f"Sampled test data: {len(test_df)} samples")
+            
+            # Data type optimization
+            for col in self.feature_columns:
+                if col in train_df.columns:
+                    train_df[col] = train_df[col].astype('float32')
+                if col in test_df.columns:
+                    test_df[col] = test_df[col].astype('float32')
+            
+            if Config.TARGET_COLUMN in train_df.columns:
+                train_df[Config.TARGET_COLUMN] = train_df[Config.TARGET_COLUMN].astype('int16')
+            
+            # Basic data cleaning
+            train_df, test_df = self._handle_data_issues(train_df, test_df)
+            
+            return train_df, test_df
+            
+        except Exception as e:
+            print(f"Quick data loading failed: {e}")
+            raise
+    
     def _handle_data_issues(self, train_df, test_df):
         """Handle data issues"""
         for col in self.feature_columns:
@@ -118,6 +165,21 @@ class DataProcessor:
             outliers = ((sensor_data < lower_bound) | (sensor_data > upper_bound)).sum(axis=1)
             df['sensor_outlier_count'] = outliers.astype('float32')
             df['sensor_outlier_ratio'] = (outliers / len(self.feature_columns)).astype('float32')
+        
+        return X_train, X_test
+    
+    @timer
+    def create_quick_statistical_features(self, X_train, X_test):
+        """Create minimal statistical features for quick mode"""
+        print("Creating basic statistical features for quick mode")
+        
+        for df in [X_train, X_test]:
+            sensor_data = df[self.feature_columns].values
+            
+            # Only essential statistics
+            df['sensor_mean'] = np.mean(sensor_data, axis=1).astype('float32')
+            df['sensor_std'] = np.std(sensor_data, axis=1).astype('float32')
+            df['sensor_range'] = (np.max(sensor_data, axis=1) - np.min(sensor_data, axis=1)).astype('float32')
         
         return X_train, X_test
     
@@ -320,6 +382,34 @@ class DataProcessor:
         return X_train_selected, X_test_selected
     
     @timer
+    def quick_feature_selection(self, X_train, X_test, y_train):
+        """Quick feature selection for quick mode"""
+        print(f"Quick feature selection (target: {Config.QUICK_FEATURE_COUNT} features)")
+        
+        # Remove constant features
+        constant_features = []
+        for col in X_train.columns:
+            if X_train[col].nunique() <= 1:
+                constant_features.append(col)
+        
+        if constant_features:
+            X_train = X_train.drop(columns=constant_features)
+            X_test = X_test.drop(columns=constant_features)
+        
+        # Simple variance-based selection
+        variances = X_train.var()
+        top_variance_features = variances.nlargest(Config.QUICK_FEATURE_COUNT).index.tolist()
+        
+        self.selected_features = top_variance_features
+        
+        X_train_selected = X_train[self.selected_features].copy()
+        X_test_selected = X_test[self.selected_features].copy()
+        
+        print(f"Selected {len(self.selected_features)} features by variance")
+        
+        return X_train_selected, X_test_selected
+    
+    @timer
     def get_processed_data(self, use_resampling=True, scaling_method='robust'):
         """Execute complete data preprocessing pipeline"""
         print("Starting complete data preprocessing pipeline")
@@ -382,6 +472,57 @@ class DataProcessor:
             
         except Exception as e:
             print(f"Error during data preprocessing: {e}")
+            gc.collect()
+            raise
+    
+    @timer
+    def get_quick_processed_data(self):
+        """Execute quick data preprocessing pipeline"""
+        print("Starting quick data preprocessing pipeline")
+        
+        try:
+            # 1. Quick data loading
+            train_df, test_df = self.load_quick_data()
+            
+            # Save ID columns
+            train_ids = train_df[Config.ID_COLUMN].copy()
+            test_ids = test_df[Config.ID_COLUMN].copy()
+            
+            # Separate features and target
+            X_train = train_df[self.feature_columns].copy()
+            X_test = test_df[self.feature_columns].copy()
+            y_train = train_df[Config.TARGET_COLUMN].copy()
+            
+            del train_df, test_df
+            gc.collect()
+            
+            # 2. Create basic statistical features
+            X_train, X_test = self.create_quick_statistical_features(X_train, X_test)
+            
+            # 3. Quick scaling
+            X_train, X_test = self.scale_features(X_train, X_test, 'robust')
+            
+            # 4. Quick feature selection
+            X_train, X_test = self.quick_feature_selection(X_train, X_test, y_train)
+            
+            # 5. Final validation
+            train_nan_count = X_train.isna().sum().sum()
+            test_nan_count = X_test.isna().sum().sum()
+            
+            if train_nan_count > 0 or test_nan_count > 0:
+                X_train.fillna(0, inplace=True)
+                X_test.fillna(0, inplace=True)
+                print("Replaced remaining NaN with 0")
+            
+            print(f"Quick processing complete")
+            print(f"Final data shapes - training: {X_train.shape}, test: {X_test.shape}")
+            
+            gc.collect()
+            
+            return X_train, X_test, y_train, train_ids, test_ids
+            
+        except Exception as e:
+            print(f"Error during quick data preprocessing: {e}")
             gc.collect()
             raise
     
