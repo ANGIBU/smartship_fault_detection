@@ -383,46 +383,25 @@ def run_quick_mode():
         print(f"Number of trained models: {len(models)}")
         if best_model is not None:
             print(f"Best performing model: {type(best_model).__name__}")
-            
-            # Performance Analysis
-            print("\n" + "=" * 50)
-            print("Performance Analysis")
-            print("=" * 50)
+        
+        # Performance Analysis (silent processing)
+        quick_analysis = None
+        suggestions = None
+        
+        if best_model is not None:
+            print("Running performance analysis...")
             
             # Get feature names
             feature_names = list(X_train.columns)
             
-            # Quick performance analysis
+            # Quick performance analysis (silent)
             quick_analysis = analyzer.quick_performance_analysis(
                 best_model, X_train_split, X_val, y_train_split, y_val,
                 feature_names, type(best_model).__name__
             )
             
-            # Print analysis results
-            print(f"\nQuick Analysis Results:")
-            print(f"Macro F1 Score: {quick_analysis['performance_metrics']['macro_f1']:.4f}")
-            print(f"Training samples: {quick_analysis['performance_metrics']['train_samples']}")
-            print(f"Validation samples: {quick_analysis['performance_metrics']['test_samples']}")
-            print(f"Features used: {quick_analysis['performance_metrics']['features_used']}")
-            
-            if 'top_5_features' in quick_analysis['feature_analysis']:
-                print(f"\nTop 5 Important Features:")
-                for i, (feature, score) in enumerate(zip(
-                    quick_analysis['feature_analysis']['top_5_features'],
-                    quick_analysis['feature_analysis']['top_5_scores']
-                )):
-                    print(f"  {i+1}. {feature}: {score:.4f}")
-            
-            print(f"\nPerformance Recommendations:")
-            for rec in quick_analysis['recommendations']:
-                print(f"  - {rec}")
-            
             # Generate improvement suggestions
             suggestions = analyzer.get_improvement_suggestions()
-            if suggestions['high_priority']:
-                print(f"\nHigh Priority Improvements:")
-                for suggestion in suggestions['high_priority']:
-                    print(f"  - {suggestion}")
         
         # Test prediction
         if best_model is not None:
@@ -437,13 +416,71 @@ def run_quick_mode():
                 analyzer.save_visualizations()
                 report_path = Config.MODEL_DIR / "quick_analysis_report.txt"
                 analyzer.generate_performance_report(report_path)
-                print(f"\nAnalysis report saved: {report_path}")
             except Exception as e:
                 print(f"Analysis save failed: {e}")
         else:
             submission_df = None
         
         print(f"Quick execution complete: {Config.RESULT_FILE}")
+        
+        # ========================================
+        # FINAL ANALYSIS SUMMARY (맨 마지막 출력)
+        # ========================================
+        if quick_analysis is not None:
+            print("\n" + "=" * 60)
+            print("FINAL PERFORMANCE ANALYSIS SUMMARY")
+            print("=" * 60)
+            
+            # Performance metrics
+            print(f"Model: {quick_analysis['model_name']}")
+            print(f"Macro F1 Score: {quick_analysis['performance_metrics']['macro_f1']:.4f}")
+            print(f"Training samples: {quick_analysis['performance_metrics']['train_samples']:,}")
+            print(f"Validation samples: {quick_analysis['performance_metrics']['test_samples']:,}")
+            print(f"Features used: {quick_analysis['performance_metrics']['features_used']}")
+            
+            # Performance evaluation
+            f1_score = quick_analysis['performance_metrics']['macro_f1']
+            if f1_score >= 0.8:
+                performance_level = "EXCELLENT"
+            elif f1_score >= 0.7:
+                performance_level = "GOOD"
+            elif f1_score >= 0.6:
+                performance_level = "FAIR" 
+            else:
+                performance_level = "NEEDS IMPROVEMENT"
+            
+            print(f"Performance Level: {performance_level}")
+            
+            # Top important features
+            if 'top_5_features' in quick_analysis['feature_analysis']:
+                print(f"\nTop 5 Most Important Features:")
+                for i, (feature, score) in enumerate(zip(
+                    quick_analysis['feature_analysis']['top_5_features'],
+                    quick_analysis['feature_analysis']['top_5_scores']
+                ), 1):
+                    print(f"  {i}. {feature}: {score:.4f}")
+            
+            # Performance recommendations
+            if quick_analysis['recommendations']:
+                print(f"\nPerformance Recommendations:")
+                for i, rec in enumerate(quick_analysis['recommendations'], 1):
+                    print(f"  {i}. {rec}")
+            
+            # High priority improvements
+            if suggestions and suggestions['high_priority']:
+                print(f"\nHigh Priority Improvements:")
+                for i, suggestion in enumerate(suggestions['high_priority'], 1):
+                    print(f"  {i}. {suggestion}")
+            
+            # Visualization files info
+            print(f"\nGenerated Analysis Files:")
+            print(f"  - Performance Report: {Config.MODEL_DIR}/quick_analysis_report.txt")
+            print(f"  - Feature Importance Chart: {Config.MODEL_DIR}/quick_feature_importance.html")
+            print(f"  - Submission File: {Config.RESULT_FILE}")
+            
+            print("\n" + "=" * 60)
+            print("Open the HTML files in your browser to view interactive charts")
+            print("=" * 60)
         
         return models, best_model, submission_df, analyzer
         
