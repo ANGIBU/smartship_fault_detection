@@ -39,12 +39,12 @@ class Config:
     
     # Feature selection settings
     FEATURE_SELECTION_METHODS = ['mutual_info', 'f_classif', 'chi2']
-    TARGET_FEATURES = 35
+    TARGET_FEATURES = 42
     
     # Class weight settings
     USE_CLASS_WEIGHTS = True
-    FOCAL_LOSS_ALPHA = 1.0
-    FOCAL_LOSS_GAMMA = 2.0
+    FOCAL_LOSS_ALPHA = 1.2
+    FOCAL_LOSS_GAMMA = 2.5
     
     # Quick mode settings
     QUICK_MODE = False
@@ -58,22 +58,24 @@ class Config:
         'num_class': N_CLASSES,
         'metric': 'multi_logloss',
         'boosting_type': 'gbdt',
-        'num_leaves': 31,
-        'learning_rate': 0.05,
-        'feature_fraction': 0.8,
-        'bagging_fraction': 0.8,
-        'bagging_freq': 5,
-        'min_child_samples': 20,
-        'min_child_weight': 0.001,
-        'min_split_gain': 0.02,
-        'reg_alpha': 0.1,
-        'reg_lambda': 0.1,
-        'max_depth': 6,
+        'num_leaves': 45,
+        'learning_rate': 0.045,
+        'feature_fraction': 0.85,
+        'bagging_fraction': 0.85,
+        'bagging_freq': 3,
+        'min_child_samples': 15,
+        'min_child_weight': 0.0008,
+        'min_split_gain': 0.015,
+        'reg_alpha': 0.12,
+        'reg_lambda': 0.08,
+        'max_depth': 7,
         'verbose': -1,
         'random_state': RANDOM_STATE,
-        'n_estimators': 500,
+        'n_estimators': 600,
         'n_jobs': N_JOBS,
-        'class_weight': 'balanced'
+        'class_weight': 'balanced',
+        'subsample': 0.88,
+        'colsample_bytree': 0.9
     }
     
     # Quick LightGBM parameters
@@ -100,73 +102,78 @@ class Config:
     XGB_PARAMS = {
         'objective': 'multi:softprob',
         'num_class': N_CLASSES,
-        'learning_rate': 0.05,
-        'max_depth': 6,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'reg_alpha': 0.1,
-        'reg_lambda': 0.1,
-        'gamma': 0.1,
-        'min_child_weight': 1,
+        'learning_rate': 0.042,
+        'max_depth': 7,
+        'subsample': 0.88,
+        'colsample_bytree': 0.85,
+        'reg_alpha': 0.08,
+        'reg_lambda': 0.12,
+        'gamma': 0.08,
+        'min_child_weight': 0.8,
         'random_state': RANDOM_STATE,
-        'n_estimators': 500,
+        'n_estimators': 650,
         'n_jobs': N_JOBS,
         'tree_method': 'hist',
         'verbosity': 0,
-        'eval_metric': 'mlogloss'
+        'eval_metric': 'mlogloss',
+        'scale_pos_weight': 1.2
     }
     
     # CatBoost parameters
     CAT_PARAMS = {
-        'iterations': 500,
-        'learning_rate': 0.05,
-        'depth': 6,
-        'l2_leaf_reg': 3,
-        'border_count': 128,
+        'iterations': 550,
+        'learning_rate': 0.048,
+        'depth': 7,
+        'l2_leaf_reg': 2.5,
+        'border_count': 150,
         'thread_count': N_JOBS,
         'random_state': RANDOM_STATE,
         'verbose': False,
         'loss_function': 'MultiClass',
         'classes_count': N_CLASSES,
-        'auto_class_weights': 'Balanced'
+        'auto_class_weights': 'Balanced',
+        'bootstrap_type': 'Bayesian',
+        'bagging_temperature': 0.8,
+        'subsample': 0.88
     }
     
     # Random Forest parameters
     RF_PARAMS = {
-        'n_estimators': 300,
-        'max_depth': 10,
-        'min_samples_split': 10,
-        'min_samples_leaf': 5,
+        'n_estimators': 400,
+        'max_depth': 12,
+        'min_samples_split': 8,
+        'min_samples_leaf': 3,
         'max_features': 'sqrt',
         'random_state': RANDOM_STATE,
         'n_jobs': N_JOBS,
-        'class_weight': 'balanced'
+        'class_weight': 'balanced',
+        'bootstrap': True,
+        'max_samples': 0.9
     }
     
     # Extra Trees parameters
     ET_PARAMS = {
-        'n_estimators': 300,
-        'max_depth': 10,
-        'min_samples_split': 10,
-        'min_samples_leaf': 5,
+        'n_estimators': 350,
+        'max_depth': 11,
+        'min_samples_split': 6,
+        'min_samples_leaf': 2,
         'max_features': 'sqrt',
         'random_state': RANDOM_STATE,
         'n_jobs': N_JOBS,
-        'class_weight': 'balanced'
+        'class_weight': 'balanced',
+        'bootstrap': False
     }
     
-    # Hyperparameter tuning settings - optimized
-    OPTUNA_TRIALS = 25
-    OPTUNA_TIMEOUT = 1800
+    # Hyperparameter tuning settings
+    OPTUNA_TRIALS = 35
+    OPTUNA_TIMEOUT = 2400
     OPTUNA_CV_FOLDS = 3
     
     # Ensemble settings
     ENSEMBLE_WEIGHTS = {
-        'lightgbm': 0.3,
-        'xgboost': 0.25,
-        'catboost': 0.25,
-        'random_forest': 0.1,
-        'extra_trees': 0.1
+        'lightgbm': 0.32,
+        'xgboost': 0.35,
+        'catboost': 0.33
     }
     
     # Logging settings
@@ -181,10 +188,24 @@ class Config:
     VALIDATION_STRATEGY = 'stratified'
     
     # Class performance threshold
-    CLASS_PERFORMANCE_THRESHOLD = 0.60
+    CLASS_PERFORMANCE_THRESHOLD = 0.65
     
     # Scaling method
     SCALING_METHOD = 'robust'
+    
+    # Feature engineering settings
+    CREATE_INTERACTION_FEATURES = True
+    CREATE_POLYNOMIAL_FEATURES = True
+    POLYNOMIAL_DEGREE = 2
+    INTERACTION_TOP_N = 10
+    
+    # Statistical feature settings
+    STATISTICAL_FEATURES = [
+        'mean', 'std', 'median', 'min', 'max', 'range',
+        'skew', 'kurtosis', 'q25', 'q75', 'iqr', 'cv',
+        'outlier_count', 'outlier_ratio', 'zero_count',
+        'negative_count', 'positive_count'
+    ]
     
     @classmethod
     def create_directories(cls):
@@ -223,6 +244,47 @@ class Config:
         return params_map.get(model_name, {}).copy()
     
     @classmethod
+    def get_tuning_space(cls, model_name):
+        """Return hyperparameter tuning space for each model"""
+        tuning_spaces = {
+            'lightgbm': {
+                'num_leaves': (35, 80),
+                'learning_rate': (0.03, 0.08),
+                'feature_fraction': (0.75, 0.95),
+                'bagging_fraction': (0.75, 0.95),
+                'min_child_samples': (10, 30),
+                'reg_alpha': (0.05, 0.25),
+                'reg_lambda': (0.05, 0.25),
+                'max_depth': (6, 9),
+                'n_estimators': (450, 750),
+                'subsample': (0.8, 0.95),
+                'colsample_bytree': (0.8, 0.95)
+            },
+            'xgboost': {
+                'learning_rate': (0.03, 0.07),
+                'max_depth': (6, 9),
+                'subsample': (0.8, 0.95),
+                'colsample_bytree': (0.75, 0.95),
+                'reg_alpha': (0.05, 0.2),
+                'reg_lambda': (0.05, 0.25),
+                'gamma': (0.05, 0.15),
+                'min_child_weight': (0.5, 2.0),
+                'n_estimators': (500, 800),
+                'scale_pos_weight': (1.0, 1.5)
+            },
+            'catboost': {
+                'iterations': (400, 700),
+                'learning_rate': (0.03, 0.08),
+                'depth': (6, 9),
+                'l2_leaf_reg': (1.5, 4.0),
+                'border_count': (100, 200),
+                'bagging_temperature': (0.5, 1.2),
+                'subsample': (0.8, 0.95)
+            }
+        }
+        return tuning_spaces.get(model_name, {})
+    
+    @classmethod
     def validate_config(cls):
         """Validate configuration values"""
         errors = []
@@ -257,18 +319,18 @@ class Config:
         if available_memory_gb >= 32:
             cls.N_JOBS = min(cpu_cores, 8)
             cls.CHUNK_SIZE = 15000
-            cls.OPTUNA_TRIALS = 30
-            cls.OPTUNA_TIMEOUT = 2400
+            cls.OPTUNA_TRIALS = 40
+            cls.OPTUNA_TIMEOUT = 3000
         elif available_memory_gb >= 16:
             cls.N_JOBS = min(cpu_cores, 6)
             cls.CHUNK_SIZE = 10000
-            cls.OPTUNA_TRIALS = 25
-            cls.OPTUNA_TIMEOUT = 1800
+            cls.OPTUNA_TRIALS = 35
+            cls.OPTUNA_TIMEOUT = 2400
         else:
             cls.N_JOBS = min(cpu_cores, 4)
             cls.CHUNK_SIZE = 5000
-            cls.OPTUNA_TRIALS = 15
-            cls.OPTUNA_TIMEOUT = 1200
+            cls.OPTUNA_TRIALS = 25
+            cls.OPTUNA_TIMEOUT = 1800
         
         # Update model parameters
         for params in [cls.LGBM_PARAMS, cls.XGB_PARAMS, cls.CAT_PARAMS, 

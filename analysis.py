@@ -7,9 +7,6 @@ import seaborn as sns
 from sklearn.model_selection import learning_curve, validation_curve, StratifiedKFold
 from sklearn.metrics import confusion_matrix, classification_report, f1_score
 from sklearn.inspection import permutation_importance
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -17,14 +14,71 @@ from config import Config
 from utils import timer, calculate_macro_f1
 import gc
 
+# Set matplotlib backend and style
 plt.rcParams['font.family'] = ['DejaVu Sans', 'Arial', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['figure.figsize'] = (10, 6)
+plt.rcParams['savefig.dpi'] = 300
+plt.rcParams['savefig.bbox'] = 'tight'
 
 class ModelAnalyzer:
     def __init__(self):
         self.analysis_results = {}
         self.figures = {}
         
+    def draw_ascii_chart(self, data_dict, title="Performance Chart", max_width=40):
+        """Draw ASCII chart in console"""
+        if not data_dict:
+            return
+        
+        # Sort by value
+        sorted_data = sorted(data_dict.items(), key=lambda x: x[1], reverse=True)
+        max_value = max(data_dict.values()) if data_dict.values() else 1
+        
+        # Calculate box width
+        box_width = max_width + 20
+        
+        print("┌" + "─" * (box_width - 2) + "┐")
+        print(f"│ {title:^{box_width - 4}} │")
+        print("├" + "─" * (box_width - 2) + "┤")
+        
+        for name, value in sorted_data:
+            bar_length = int((value / max_value) * max_width) if max_value > 0 else 0
+            bar = "█" * bar_length
+            name_truncated = name[:12] if len(name) > 12 else name
+            print(f"│ {name_truncated:<12} {bar:<{max_width}} {value:.4f}│")
+        
+        print("└" + "─" * (box_width - 2) + "┘")
+        print()
+    
+    def draw_class_performance_chart(self, class_metrics, title="Class Performance", max_width=35):
+        """Draw class performance ASCII chart"""
+        if not class_metrics:
+            return
+        
+        # Filter valid classes and sort by F1 score
+        valid_classes = [cm for cm in class_metrics if cm['support'] > 0]
+        if not valid_classes:
+            return
+        
+        sorted_classes = sorted(valid_classes, key=lambda x: x['f1_score'], reverse=True)[:15]
+        max_f1 = max(cm['f1_score'] for cm in sorted_classes) if sorted_classes else 1
+        
+        box_width = max_width + 25
+        
+        print("┌" + "─" * (box_width - 2) + "┐")
+        print(f"│ {title:^{box_width - 4}} │")
+        print("├" + "─" * (box_width - 2) + "┤")
+        
+        for cm in sorted_classes[:10]:  # Top 10 classes
+            bar_length = int((cm['f1_score'] / max_f1) * max_width) if max_f1 > 0 else 0
+            bar = "█" * bar_length
+            class_name = f"Class {cm['class']:2d}"
+            print(f"│ {class_name:<8} {bar:<{max_width}} {cm['f1_score']:.4f} ({cm['support']:3d})│")
+        
+        print("└" + "─" * (box_width - 2) + "┘")
+        print()
+    
     @timer
     def analyze_learning_curve(self, model, X_train, y_train, model_name="Model"):
         """Generate learning curve analysis"""
@@ -48,35 +102,20 @@ class ModelAnalyzer:
             val_mean = np.mean(val_scores, axis=1)
             val_std = np.std(val_scores, axis=1)
             
-            # Create plotly figure
-            fig = go.Figure()
+            # Create matplotlib figure
+            fig, ax = plt.subplots(figsize=(10, 6))
             
-            fig.add_trace(go.Scatter(
-                x=train_sizes_abs,
-                y=train_mean,
-                mode='lines+markers',
-                name='Training Score',
-                line=dict(color='blue'),
-                error_y=dict(type='data', array=train_std, visible=True)
-            ))
+            ax.plot(train_sizes_abs, train_mean, 'o-', color='blue', label='Training Score')
+            ax.fill_between(train_sizes_abs, train_mean - train_std, train_mean + train_std, alpha=0.1, color='blue')
             
-            fig.add_trace(go.Scatter(
-                x=train_sizes_abs,
-                y=val_mean,
-                mode='lines+markers',
-                name='Validation Score',
-                line=dict(color='red'),
-                error_y=dict(type='data', array=val_std, visible=True)
-            ))
+            ax.plot(train_sizes_abs, val_mean, 'o-', color='red', label='Validation Score')
+            ax.fill_between(train_sizes_abs, val_mean - val_std, val_mean + val_std, alpha=0.1, color='red')
             
-            fig.update_layout(
-                title=f'{model_name} Learning Curve',
-                xaxis_title='Training Set Size',
-                yaxis_title='Macro F1 Score',
-                template='plotly_white',
-                width=800,
-                height=500
-            )
+            ax.set_title(f'{model_name} Learning Curve', fontsize=14, fontweight='bold')
+            ax.set_xlabel('Training Set Size', fontsize=12)
+            ax.set_ylabel('Macro F1 Score', fontsize=12)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
             
             self.figures[f'{model_name}_learning_curve'] = fig
             
@@ -150,31 +189,43 @@ class ModelAnalyzer:
                 importance_df = pd.DataFrame({
                     'feature': feature_names,
                     'importance': importance_scores
-                }).sort_values('importance', ascending=True)
+                }).sort_values('importance', ascending=False)
                 
-                # Create horizontal bar chart
-                fig = px.bar(
-                    importance_df.tail(20),
-                    x='importance',
-                    y='feature',
-                    orientation='h',
-                    title=f'{model_name} Feature Importance ({method})',
-                    template='plotly_white',
-                    width=800,
-                    height=600
-                )
+                # Create matplotlib horizontal bar chart
+                fig, ax = plt.subplots(figsize=(12, 8))
                 
+                top_features = importance_df.head(20)
+                colors = plt.cm.viridis(np.linspace(0, 1, len(top_features)))
+                
+                bars = ax.barh(range(len(top_features)), top_features['importance'], color=colors)
+                ax.set_yticks(range(len(top_features)))
+                ax.set_yticklabels(top_features['feature'])
+                ax.set_xlabel('Importance Score', fontsize=12)
+                ax.set_title(f'{model_name} Feature Importance ({method})', fontsize=14, fontweight='bold')
+                ax.grid(True, axis='x', alpha=0.3)
+                
+                # Add value labels on bars
+                for i, bar in enumerate(bars):
+                    width = bar.get_width()
+                    ax.text(width, bar.get_y() + bar.get_height()/2, 
+                           f'{width:.4f}', ha='left', va='center', fontsize=9)
+                
+                plt.tight_layout()
                 self.figures[f'{model_name}_feature_importance'] = fig
                 
+                # Console ASCII chart
+                top_10_dict = dict(zip(top_features['feature'].head(10), top_features['importance'].head(10)))
+                self.draw_ascii_chart(top_10_dict, f"Top 10 Features - {model_name}")
+                
                 # Analysis results
-                top_features = importance_df.tail(10)['feature'].tolist()
-                low_importance_features = importance_df.head(10)['feature'].tolist()
+                top_features_list = importance_df.head(10)['feature'].tolist()
+                low_importance_features = importance_df.tail(10)['feature'].tolist()
                 
                 analysis = {
                     'method': method,
                     'feature_names': feature_names,
                     'importance_scores': importance_scores.tolist(),
-                    'top_features': top_features,
+                    'top_features': top_features_list,
                     'low_importance_features': low_importance_features,
                     'importance_ratio': float(importance_scores.max() / (importance_scores.min() + 1e-8)),
                     'recommendations': self._generate_feature_recommendations(importance_df)
@@ -212,18 +263,19 @@ class ModelAnalyzer:
             cm = confusion_matrix(y_test, y_pred, labels=range(Config.N_CLASSES))
             
             # Create heatmap
-            fig = px.imshow(
-                cm,
-                labels=dict(x="Predicted", y="Actual", color="Count"),
-                x=[f"Class {i}" for i in range(Config.N_CLASSES)],
-                y=[f"Class {i}" for i in range(Config.N_CLASSES)],
-                title=f'{model_name} Confusion Matrix',
-                template='plotly_white',
-                width=800,
-                height=600,
-                aspect="auto"
-            )
+            fig, ax = plt.subplots(figsize=(12, 10))
             
+            mask = cm == 0
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', mask=mask, 
+                       xticklabels=[f'C{i}' for i in range(Config.N_CLASSES)],
+                       yticklabels=[f'C{i}' for i in range(Config.N_CLASSES)],
+                       ax=ax, cbar_kws={'shrink': 0.8})
+            
+            ax.set_title(f'{model_name} Confusion Matrix', fontsize=14, fontweight='bold')
+            ax.set_xlabel('Predicted Class', fontsize=12)
+            ax.set_ylabel('Actual Class', fontsize=12)
+            
+            plt.tight_layout()
             self.figures[f'{model_name}_confusion_matrix'] = fig
             
             # Calculate per-class metrics
@@ -306,27 +358,45 @@ class ModelAnalyzer:
                 stability_df = pd.DataFrame(stability_data)
                 
                 # Create comparison chart
-                fig = go.Figure()
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
                 
-                for _, row in stability_df.iterrows():
-                    fig.add_trace(go.Bar(
-                        name=row['model'],
-                        x=[row['model']],
-                        y=[row['mean']],
-                        error_y=dict(type='data', array=[row['std']], visible=True)
-                    ))
+                # Mean performance chart
+                models = stability_df['model']
+                means = stability_df['mean']
+                stds = stability_df['std']
                 
-                fig.update_layout(
-                    title='Cross-Validation Performance Comparison',
-                    xaxis_title='Models',
-                    yaxis_title='Macro F1 Score',
-                    template='plotly_white',
-                    width=800,
-                    height=500,
-                    showlegend=False
-                )
+                bars1 = ax1.bar(models, means, yerr=stds, capsize=5, color='skyblue', alpha=0.7)
+                ax1.set_title('Cross-Validation Performance', fontsize=14, fontweight='bold')
+                ax1.set_ylabel('Macro F1 Score', fontsize=12)
+                ax1.tick_params(axis='x', rotation=45)
+                ax1.grid(True, alpha=0.3)
                 
+                # Add value labels on bars
+                for i, bar in enumerate(bars1):
+                    height = bar.get_height()
+                    ax1.text(bar.get_x() + bar.get_width()/2., height + stds.iloc[i],
+                            f'{height:.4f}', ha='center', va='bottom', fontsize=9)
+                
+                # Stability score chart
+                stability_scores = stability_df['stability']
+                bars2 = ax2.bar(models, stability_scores, color='lightcoral', alpha=0.7)
+                ax2.set_title('Model Stability Scores', fontsize=14, fontweight='bold')
+                ax2.set_ylabel('Stability Score', fontsize=12)
+                ax2.tick_params(axis='x', rotation=45)
+                ax2.grid(True, alpha=0.3)
+                
+                # Add value labels on bars
+                for i, bar in enumerate(bars2):
+                    height = bar.get_height()
+                    ax2.text(bar.get_x() + bar.get_width()/2., height,
+                            f'{height:.4f}', ha='center', va='bottom', fontsize=9)
+                
+                plt.tight_layout()
                 self.figures['cv_stability'] = fig
+                
+                # Console ASCII chart
+                stability_dict = dict(zip(stability_df['model'], stability_df['stability']))
+                self.draw_ascii_chart(stability_dict, "Model Stability Scores")
                 
                 # Analysis results
                 best_model = stability_df.loc[stability_df['stability'].idxmax()]
@@ -373,7 +443,7 @@ class ModelAnalyzer:
     @timer
     def quick_performance_analysis(self, model, X_train, X_test, y_train, y_test, 
                                  feature_names, model_name="QuickModel"):
-        """Quick performance analysis for --quick mode"""
+        """Quick performance analysis for quick mode"""
         print(f"Running quick performance analysis for {model_name}")
         
         analysis_summary = {
@@ -398,13 +468,20 @@ class ModelAnalyzer:
             # Quick feature importance
             if hasattr(model, 'feature_importances_'):
                 importance_scores = model.feature_importances_
-                top_features = np.argsort(importance_scores)[-5:][::-1]
+                top_indices = np.argsort(importance_scores)[-5:][::-1]
                 
                 analysis_summary['feature_analysis'] = {
-                    'top_5_features': [feature_names[i] for i in top_features],
-                    'top_5_scores': [float(importance_scores[i]) for i in top_features],
+                    'top_5_features': [feature_names[i] for i in top_indices],
+                    'top_5_scores': [float(importance_scores[i]) for i in top_indices],
                     'zero_importance_count': int(np.sum(importance_scores == 0))
                 }
+                
+                # Console ASCII chart for top features
+                top_features_dict = {
+                    feature_names[i]: float(importance_scores[i]) 
+                    for i in top_indices
+                }
+                self.draw_ascii_chart(top_features_dict, f"Top 5 Features - {model_name}")
             
             # Generate quick recommendations
             recommendations = []
@@ -424,7 +501,7 @@ class ModelAnalyzer:
             
             analysis_summary['recommendations'] = recommendations
             
-            # Simple performance visualization
+            # Create quick visualization
             self._create_quick_visualization(analysis_summary)
             
             return analysis_summary
@@ -441,16 +518,23 @@ class ModelAnalyzer:
                 features = analysis_summary['feature_analysis']['top_5_features']
                 scores = analysis_summary['feature_analysis']['top_5_scores']
                 
-                fig = px.bar(
-                    x=scores,
-                    y=features,
-                    orientation='h',
-                    title=f"Top 5 Important Features - {analysis_summary['model_name']}",
-                    template='plotly_white',
-                    width=600,
-                    height=400
-                )
+                fig, ax = plt.subplots(figsize=(10, 6))
                 
+                colors = plt.cm.viridis(np.linspace(0, 1, len(features)))
+                bars = ax.barh(features, scores, color=colors)
+                
+                ax.set_xlabel('Importance Score', fontsize=12)
+                ax.set_title(f"Top 5 Important Features - {analysis_summary['model_name']}", 
+                           fontsize=14, fontweight='bold')
+                ax.grid(True, axis='x', alpha=0.3)
+                
+                # Add value labels
+                for i, bar in enumerate(bars):
+                    width = bar.get_width()
+                    ax.text(width, bar.get_y() + bar.get_height()/2, 
+                           f'{width:.4f}', ha='left', va='center', fontsize=10)
+                
+                plt.tight_layout()
                 self.figures['quick_feature_importance'] = fig
                 
         except Exception as e:
@@ -497,8 +581,8 @@ class ModelAnalyzer:
         
         return report_text
     
-    def save_visualizations(self, output_dir=None):
-        """Save all generated visualizations"""
+    def save_visualizations(self, output_dir=None, save_format='png'):
+        """Save all generated visualizations as PNG or PDF"""
         if output_dir is None:
             output_dir = Config.MODEL_DIR
         
@@ -510,14 +594,20 @@ class ModelAnalyzer:
         
         for fig_name, fig in self.figures.items():
             try:
-                output_path = output_dir / f"{fig_name}.html"
-                fig.write_html(str(output_path))
+                if save_format.lower() == 'pdf':
+                    output_path = output_dir / f"{fig_name}.pdf"
+                else:
+                    output_path = output_dir / f"{fig_name}.png"
+                
+                fig.savefig(str(output_path), format=save_format.lower(), dpi=300, bbox_inches='tight')
                 saved_files.append(output_path)
+                plt.close(fig)  # Close figure to free memory
+                
             except Exception as e:
                 print(f"Failed to save {fig_name}: {e}")
         
         if saved_files:
-            print(f"Saved {len(saved_files)} visualization files")
+            print(f"Saved {len(saved_files)} visualization files as {save_format.upper()}")
             
         gc.collect()
     
@@ -555,8 +645,132 @@ class ModelAnalyzer:
             'total_count': len(all_recommendations)
         }
     
+    def create_performance_dashboard(self, cv_scores_dict, class_metrics=None, model_name="Dashboard"):
+        """Create comprehensive performance dashboard"""
+        try:
+            fig = plt.figure(figsize=(20, 12))
+            
+            # Model performance comparison
+            ax1 = plt.subplot(2, 3, 1)
+            if cv_scores_dict:
+                models = list(cv_scores_dict.keys())
+                scores = [cv_scores_dict[m]['mean'] for m in models]
+                stds = [cv_scores_dict[m]['std'] for m in models]
+                
+                bars = ax1.bar(models, scores, yerr=stds, capsize=5, color='skyblue', alpha=0.7)
+                ax1.set_title('Model Performance Comparison', fontweight='bold')
+                ax1.set_ylabel('Macro F1 Score')
+                ax1.tick_params(axis='x', rotation=45)
+                ax1.grid(True, alpha=0.3)
+                
+                for i, bar in enumerate(bars):
+                    height = bar.get_height()
+                    ax1.text(bar.get_x() + bar.get_width()/2., height + stds[i],
+                            f'{height:.3f}', ha='center', va='bottom', fontsize=8)
+            
+            # Class performance distribution
+            ax2 = plt.subplot(2, 3, 2)
+            if class_metrics:
+                valid_classes = [cm for cm in class_metrics if cm['support'] > 0]
+                if valid_classes:
+                    f1_scores = [cm['f1_score'] for cm in valid_classes]
+                    ax2.hist(f1_scores, bins=10, color='lightcoral', alpha=0.7, edgecolor='black')
+                    ax2.set_title('F1 Score Distribution', fontweight='bold')
+                    ax2.set_xlabel('F1 Score')
+                    ax2.set_ylabel('Number of Classes')
+                    ax2.grid(True, alpha=0.3)
+            
+            # Performance trends
+            ax3 = plt.subplot(2, 3, 3)
+            if cv_scores_dict:
+                stability_scores = [cv_scores_dict[m].get('stability', cv_scores_dict[m]['mean'] - cv_scores_dict[m]['std']) 
+                                  for m in models]
+                ax3.scatter(scores, stability_scores, s=100, alpha=0.7, c=range(len(models)), cmap='viridis')
+                ax3.set_xlabel('Mean F1 Score')
+                ax3.set_ylabel('Stability Score')
+                ax3.set_title('Performance vs Stability', fontweight='bold')
+                ax3.grid(True, alpha=0.3)
+                
+                for i, model in enumerate(models):
+                    ax3.annotate(model, (scores[i], stability_scores[i]), 
+                               xytext=(5, 5), textcoords='offset points', fontsize=8)
+            
+            # Model variance comparison
+            ax4 = plt.subplot(2, 3, 4)
+            if cv_scores_dict:
+                ax4.bar(models, stds, color='orange', alpha=0.7)
+                ax4.set_title('Model Variance Comparison', fontweight='bold')
+                ax4.set_ylabel('Standard Deviation')
+                ax4.tick_params(axis='x', rotation=45)
+                ax4.grid(True, alpha=0.3)
+            
+            # Performance target analysis
+            ax5 = plt.subplot(2, 3, 5)
+            if cv_scores_dict:
+                target_score = 0.83
+                gaps = [target_score - score for score in scores]
+                colors = ['green' if gap <= 0 else 'red' for gap in gaps]
+                
+                bars = ax5.bar(models, gaps, color=colors, alpha=0.7)
+                ax5.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+                ax5.set_title('Gap to Target (0.83)', fontweight='bold')
+                ax5.set_ylabel('Gap to Target')
+                ax5.tick_params(axis='x', rotation=45)
+                ax5.grid(True, alpha=0.3)
+            
+            # Summary statistics
+            ax6 = plt.subplot(2, 3, 6)
+            ax6.axis('off')
+            
+            if cv_scores_dict:
+                best_model = max(cv_scores_dict.keys(), key=lambda x: cv_scores_dict[x].get('stability', 0))
+                best_score = cv_scores_dict[best_model]['mean']
+                
+                summary_text = f"""Performance Summary:
+                
+Best Model: {best_model}
+Best Score: {best_score:.4f}
+Target Gap: {0.83 - best_score:.4f}
+
+Model Count: {len(models)}
+Score Range: {max(scores) - min(scores):.4f}
+Avg Variance: {np.mean(stds):.4f}
+                """
+                
+                ax6.text(0.1, 0.9, summary_text, transform=ax6.transAxes, fontsize=10,
+                        verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.5))
+            
+            plt.tight_layout()
+            self.figures[f'{model_name}_dashboard'] = fig
+            
+            # Console summary
+            if cv_scores_dict:
+                print("\n" + "="*60)
+                print("PERFORMANCE DASHBOARD SUMMARY")
+                print("="*60)
+                
+                # Best model console display
+                stability_dict = {
+                    model: cv_scores_dict[model].get('stability', cv_scores_dict[model]['mean'] - cv_scores_dict[model]['std'])
+                    for model in models
+                }
+                self.draw_ascii_chart(stability_dict, "Model Stability Overview")
+            
+            return fig
+            
+        except Exception as e:
+            print(f"Dashboard creation failed: {e}")
+            return None
+    
     def clear_analysis(self):
         """Clear all analysis results and figures"""
+        # Close all matplotlib figures
+        for fig in self.figures.values():
+            try:
+                plt.close(fig)
+            except:
+                pass
+        
         self.analysis_results.clear()
         self.figures.clear()
         gc.collect()

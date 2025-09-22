@@ -16,6 +16,7 @@ from pathlib import Path
 import gc
 import os
 from scipy.stats import zscore
+from scipy import stats
 
 warnings.filterwarnings('ignore')
 
@@ -186,6 +187,18 @@ def calculate_all_metrics(y_true, y_pred):
             'weighted_precision': precision_score(y_true, y_pred, average='weighted', zero_division=0),
             'weighted_recall': recall_score(y_true, y_pred, average='weighted', zero_division=0)
         }
+        
+        # Calculate per-class F1 statistics
+        class_f1_scores = f1_score(y_true, y_pred, average=None, zero_division=0)
+        valid_scores = class_f1_scores[class_f1_scores > 0]
+        
+        if len(valid_scores) > 0:
+            metrics['f1_std'] = np.std(valid_scores)
+            metrics['f1_min'] = np.min(valid_scores)
+            metrics['f1_max'] = np.max(valid_scores)
+            metrics['f1_range'] = metrics['f1_max'] - metrics['f1_min']
+            metrics['low_performance_classes'] = np.sum(class_f1_scores < 0.5)
+        
     except Exception as e:
         print(f"Error calculating metrics: {e}")
         metrics = {
@@ -196,7 +209,12 @@ def calculate_all_metrics(y_true, y_pred):
             'macro_precision': 0.0,
             'macro_recall': 0.0,
             'weighted_precision': 0.0,
-            'weighted_recall': 0.0
+            'weighted_recall': 0.0,
+            'f1_std': 0.0,
+            'f1_min': 0.0,
+            'f1_max': 0.0,
+            'f1_range': 0.0,
+            'low_performance_classes': 0
         }
     
     return metrics
@@ -226,14 +244,48 @@ def calculate_class_metrics(y_true, y_pred, labels=None):
         print(f"Error calculating class metrics: {e}")
         return []
 
+def calculate_stability_metrics(cv_scores_dict):
+    """Calculate stability metrics for cross-validation results"""
+    stability_metrics = {}
+    
+    for model_name, scores in cv_scores_dict.items():
+        if 'scores' in scores:
+            cv_scores = scores['scores']
+            mean_score = np.mean(cv_scores)
+            std_score = np.std(cv_scores)
+            
+            # Coefficient of variation (normalized stability)
+            cv_stability = std_score / mean_score if mean_score > 0 else float('inf')
+            
+            # Confidence interval
+            confidence_interval = stats.t.interval(
+                0.95, len(cv_scores)-1, 
+                loc=mean_score, 
+                scale=stats.sem(cv_scores)
+            )
+            
+            # Range of scores
+            score_range = np.max(cv_scores) - np.min(cv_scores)
+            
+            stability_metrics[model_name] = {
+                'cv_stability': cv_stability,
+                'confidence_interval': confidence_interval,
+                'score_range': score_range,
+                'confidence_width': confidence_interval[1] - confidence_interval[0]
+            }
+    
+    return stability_metrics
+
 def print_classification_metrics(y_true, y_pred, class_names=None, target_names=None):
     """Print classification performance metrics"""
     try:
         metrics = calculate_all_metrics(y_true, y_pred)
         
         print("Classification Performance Metrics")
+        print("-" * 40)
         for metric_name, value in metrics.items():
-            print(f"{metric_name:20s}: {value:.4f}")
+            if isinstance(value, (int, float)):
+                print(f"{metric_name:20s}: {value:.4f}")
         
         if target_names is None and class_names is not None:
             target_names = [str(c) for c in class_names]
@@ -289,11 +341,36 @@ def calculate_class_weights(y, method='balanced'):
             for class_label, count in class_counts.items():
                 weights[class_label] = total_samples / (len(class_counts) * count)
             return weights
+        elif method == 'sqrt_inv_freq':
+            class_counts = Counter(y)
+            total_samples = len(y)
+            weights = {}
+            for class_label, count in class_counts.items():
+                weights[class_label] = np.sqrt(total_samples / count)
+            return weights
         else:
             return None
     except Exception as e:
         print(f"Class weight calculation failed: {e}")
         return None
+
+def detect_outliers_iqr(data, multiplier=1.5):
+    """Detect outliers using IQR method"""
+    Q1 = np.percentile(data, 25)
+    Q3 = np.percentile(data, 75)
+    IQR = Q3 - Q1
+    
+    lower_bound = Q1 - multiplier * IQR
+    upper_bound = Q3 + multiplier * IQR
+    
+    outliers = (data < lower_bound) | (data > upper_bound)
+    return outliers
+
+def detect_outliers_zscore(data, threshold=3):
+    """Detect outliers using Z-score method"""
+    z_scores = np.abs(zscore(data))
+    outliers = z_scores > threshold
+    return outliers
 
 def timer(func):
     """Function execution time measurement decorator"""
@@ -372,15 +449,45 @@ def check_data_quality(df, feature_columns):
         # Basic statistics
         if len(numeric_cols) > 0:
             print(f"\nBasic statistics ({len(numeric_cols)} numeric columns):")
-            stats = df[numeric_cols].describe()
-            print(f"  Mean range: {stats.loc['mean'].min():.4f} ~ {stats.loc['mean'].max():.4f}")
-            print(f"  Std range: {stats.loc['std'].min():.4f} ~ {stats.loc['std'].max():.4f}")
-            print(f"  Min value: {stats.loc['min'].min():.4f}")
-            print(f"  Max value: {stats.loc['max'].max():.4f}")
+            stats_df = df[numeric_cols].describe()
+            print(f"  Mean range: {stats_df.loc['mean'].min():.4f} ~ {stats_df.loc['mean'].max():.4f}")
+            print(f"  Std range: {stats_df.loc['std'].min():.4f} ~ {stats_df.loc['std'].max():.4f}")
+            print(f"  Min value: {stats_df.loc['min'].min():.4f}")
+            print(f"  Max value: {stats_df.loc['max'].max():.4f}")
+            
+            # Check for potential data leakage patterns
+            zero_variance_cols = []
+            high_correlation_pairs = []
+            
+            for col in numeric_cols[:10]:  # Check first 10 columns only
+                if df[col].std() == 0:
+                    zero_variance_cols.append(col)
+            
+            if zero_variance_cols:
+                print(f"  Zero variance columns: {len(zero_variance_cols)}")
+            
+            # Check correlation matrix for potential issues
+            if len(numeric_cols) >= 2:
+                try:
+                    corr_matrix = df[numeric_cols].corr()
+                    high_corr_count = (np.abs(corr_matrix) > 0.95).sum().sum() - len(numeric_cols)
+                    if high_corr_count > 0:
+                        print(f"  High correlation pairs (>0.95): {high_corr_count // 2}")
+                except Exception as e:
+                    print(f"  Correlation analysis failed: {e}")
         
         # Memory usage
         memory_mb = df.memory_usage(deep=True).sum() / 1024 / 1024
         print(f"Memory usage: {memory_mb:.2f} MB")
+        
+        # Data quality score
+        quality_score = 1.0
+        if total_missing > 0:
+            quality_score -= min(0.3, total_missing / (len(df) * len(feature_columns)))
+        if total_inf > 0:
+            quality_score -= min(0.2, total_inf / (len(df) * len(feature_columns)))
+        
+        print(f"Data quality score: {quality_score:.3f}")
         
         return total_missing == 0 and total_inf == 0
         
@@ -475,6 +582,22 @@ def validate_predictions(y_pred, n_classes, sample_ids=None):
                 print(f"Missing classes: {missing_list[:10]} ... (total {len(missing_list)})")
             is_valid = False
         
+        # Distribution entropy (measure of uniformity)
+        probs = counts / len(y_pred)
+        entropy = -np.sum(probs * np.log(probs + 1e-10))
+        max_entropy = np.log(n_classes)
+        normalized_entropy = entropy / max_entropy
+        
+        print(f"Distribution entropy: {normalized_entropy:.3f} (1.0 = uniform)")
+        
+        # Gini coefficient (measure of inequality)
+        sorted_counts = np.sort(counts)
+        n = len(sorted_counts)
+        cumsum = np.cumsum(sorted_counts)
+        gini = (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
+        
+        print(f"Distribution Gini coefficient: {gini:.3f} (0.0 = uniform)")
+        
         return is_valid
         
     except Exception as e:
@@ -530,11 +653,23 @@ def analyze_class_distribution(y, class_names=None):
         min_count = min(counts[counts > 0]) if np.any(counts > 0) else 1
         imbalance_ratio = max_count / min_count
         
+        # Statistical measures
+        mean_count = np.mean(counts)
+        std_count = np.std(counts)
+        cv_count = std_count / mean_count if mean_count > 0 else float('inf')
+        
         print(f"\nDistribution statistics:")
         print(f"  Max class size: {max_count}")
         print(f"  Min class size: {min_count}")
+        print(f"  Mean class size: {mean_count:.1f}")
+        print(f"  Std class size: {std_count:.1f}")
+        print(f"  Coefficient of variation: {cv_count:.3f}")
         print(f"  Imbalance ratio: {imbalance_ratio:.2f}:1")
-        print(f"  Standard deviation: {np.std(counts):.2f}")
+        
+        # Effective number of classes (Renyi entropy based measure)
+        probs = counts / total_samples
+        effective_classes = 1 / np.sum(probs ** 2)
+        print(f"  Effective number of classes: {effective_classes:.1f}")
         
         return distribution_data
         
@@ -646,7 +781,7 @@ def optimize_dataframe_memory(df):
         final_memory = df.memory_usage(deep=True).sum() / 1024 / 1024
         memory_reduction = (initial_memory - final_memory) / initial_memory * 100
         
-        print(f"Memory usage optimization: {initial_memory:.1f}MB -> {final_memory:.1f}MB ({memory_reduction:.1f}% reduction)")
+        print(f"Memory usage reduction: {initial_memory:.1f}MB -> {final_memory:.1f}MB ({memory_reduction:.1f}% reduction)")
         
         return df
         
@@ -721,3 +856,28 @@ def validate_data_consistency(train_df, test_df, feature_columns):
     except Exception as e:
         print(f"Data consistency validation failed: {e}")
         return False
+
+def calculate_performance_gain(baseline_score, improved_score):
+    """Calculate performance gain metrics"""
+    try:
+        absolute_gain = improved_score - baseline_score
+        relative_gain = (improved_score - baseline_score) / baseline_score * 100 if baseline_score > 0 else 0
+        
+        # Target achievement percentage
+        target_score = 0.83  # Target macro F1
+        target_achievement = (improved_score / target_score * 100) if target_score > 0 else 0
+        
+        # Gap to target
+        gap_to_target = target_score - improved_score
+        gap_percentage = gap_to_target / target_score * 100 if target_score > 0 else 0
+        
+        return {
+            'absolute_gain': absolute_gain,
+            'relative_gain': relative_gain,
+            'target_achievement': target_achievement,
+            'gap_to_target': gap_to_target,
+            'gap_percentage': gap_percentage
+        }
+    except Exception as e:
+        print(f"Performance gain calculation failed: {e}")
+        return None
