@@ -132,9 +132,7 @@ class Config:
         'loss_function': 'MultiClass',
         'classes_count': N_CLASSES,
         'auto_class_weights': 'Balanced',
-        'bootstrap_type': 'Bayesian',
-        'bagging_temperature': 0.8,
-        'subsample': 0.88
+        'bootstrap_type': 'MVS'
     }
     
     # Random Forest parameters
@@ -278,8 +276,7 @@ class Config:
                 'depth': (6, 9),
                 'l2_leaf_reg': (1.5, 4.0),
                 'border_count': (100, 200),
-                'bagging_temperature': (0.5, 1.2),
-                'subsample': (0.8, 0.95)
+                'bagging_temperature': (0.5, 1.2)
             }
         }
         return tuning_spaces.get(model_name, {})

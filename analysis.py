@@ -546,6 +546,114 @@ class ModelAnalyzer:
             analysis_summary['error'] = str(e)
             return analysis_summary
     
+    def get_improvement_suggestions(self):
+        """Generate improvement suggestions based on performance data"""
+        suggestions = {
+            'high_priority': [],
+            'medium_priority': [],
+            'low_priority': []
+        }
+        
+        try:
+            if not self.performance_data:
+                return suggestions
+            
+            best_model = max(self.performance_data, key=lambda x: x['macro_f1'])
+            current_score = best_model['macro_f1']
+            target_gap = abs(best_model['target_gap'])
+            
+            # High priority suggestions
+            if current_score < 0.75:
+                suggestions['high_priority'].append("Consider ensemble methods with multiple models")
+                suggestions['high_priority'].append("Apply class balancing techniques for minority classes")
+                suggestions['high_priority'].append("Increase feature engineering complexity")
+            
+            if target_gap > 0.08:
+                suggestions['high_priority'].append("Hyperparameter tuning required for model optimization")
+                suggestions['high_priority'].append("Cross-validation strategy needs adjustment")
+            
+            # Medium priority suggestions
+            if current_score >= 0.70 and current_score < 0.80:
+                suggestions['medium_priority'].append("Feature selection methods could be refined")
+                suggestions['medium_priority'].append("Model calibration might improve probability predictions")
+                suggestions['medium_priority'].append("Data preprocessing pipeline optimization")
+            
+            # Low priority suggestions  
+            if current_score >= 0.75:
+                suggestions['low_priority'].append("Model interpretability analysis")
+                suggestions['low_priority'].append("Performance monitoring system setup")
+                suggestions['low_priority'].append("Model deployment preparation")
+            
+            return suggestions
+            
+        except Exception as e:
+            print(f"Error generating suggestions: {e}")
+            return suggestions
+    
+    def save_visualizations(self):
+        """Save analysis visualizations"""
+        try:
+            if not self.figures:
+                print("No visualizations to save")
+                return
+            
+            for name, fig in self.figures.items():
+                if fig is not None:
+                    save_path = self.results_dir / f"{name}_visualization.png"
+                    fig.savefig(save_path, dpi=300, bbox_inches='tight')
+                    print(f"Saved visualization: {save_path}")
+            
+        except Exception as e:
+            print(f"Error saving visualizations: {e}")
+    
+    def generate_performance_report(self, output_path):
+        """Generate text-based performance report"""
+        try:
+            if not self.performance_data:
+                print("No performance data available for report")
+                return
+            
+            report_lines = []
+            report_lines.append("Equipment Fault Detection System - Performance Analysis Report")
+            report_lines.append("=" * 70)
+            report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            report_lines.append("")
+            
+            # Summary section
+            best_model = max(self.performance_data, key=lambda x: x['macro_f1'])
+            report_lines.append("EXECUTIVE SUMMARY")
+            report_lines.append("-" * 20)
+            report_lines.append(f"Best Performing Model: {best_model['model_name']}")
+            report_lines.append(f"Macro F1 Score: {best_model['macro_f1']:.4f}")
+            report_lines.append(f"Target Achievement: {((best_model['macro_f1']/0.83)*100):.1f}%")
+            report_lines.append(f"Performance Tier: {best_model['performance_tier']}")
+            report_lines.append("")
+            
+            # Model comparison
+            report_lines.append("MODEL PERFORMANCE COMPARISON")
+            report_lines.append("-" * 30)
+            for model in self.performance_data:
+                report_lines.append(f"{model['model_name']:<15}: {model['macro_f1']:.4f} F1 | {model['performance_tier']:<8}")
+            report_lines.append("")
+            
+            # Recommendations
+            suggestions = self.get_improvement_suggestions()
+            if suggestions['high_priority']:
+                report_lines.append("HIGH PRIORITY RECOMMENDATIONS")
+                report_lines.append("-" * 30)
+                for i, suggestion in enumerate(suggestions['high_priority'], 1):
+                    report_lines.append(f"{i}. {suggestion}")
+                report_lines.append("")
+            
+            # Write report
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(report_lines))
+            
+            print(f"Performance report generated: {output_path}")
+            
+        except Exception as e:
+            print(f"Error generating performance report: {e}")
+    
     def clear_analysis(self):
         """Clear all analysis results and figures"""
         # Close all matplotlib figures

@@ -401,7 +401,11 @@ def run_quick_mode():
             )
             
             # Generate improvement suggestions
-            suggestions = analyzer.get_improvement_suggestions()
+            try:
+                suggestions = analyzer.get_improvement_suggestions()
+            except Exception as e:
+                print(f"Error generating suggestions: {e}")
+                suggestions = {'high_priority': [], 'medium_priority': [], 'low_priority': []}
         
         # Test prediction
         if best_model is not None:
@@ -424,7 +428,7 @@ def run_quick_mode():
         print(f"Quick execution complete: {Config.RESULT_FILE}")
         
         # ========================================
-        # FINAL ANALYSIS SUMMARY (맨 마지막 출력)
+        # FINAL ANALYSIS SUMMARY
         # ========================================
         if quick_analysis is not None:
             print("\n" + "=" * 60)
@@ -475,11 +479,10 @@ def run_quick_mode():
             # Visualization files info
             print(f"\nGenerated Analysis Files:")
             print(f"  - Performance Report: {Config.MODEL_DIR}/quick_analysis_report.txt")
-            print(f"  - Feature Importance Chart: {Config.MODEL_DIR}/quick_feature_importance.html")
             print(f"  - Submission File: {Config.RESULT_FILE}")
             
             print("\n" + "=" * 60)
-            print("Open the HTML files in your browser to view interactive charts")
+            print("Analysis results saved in results/ directory")
             print("=" * 60)
         
         return models, best_model, submission_df, analyzer

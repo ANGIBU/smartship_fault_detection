@@ -189,12 +189,10 @@ class ModelTraining:
             model = xgb.XGBClassifier(**params)
             
             if X_val is not None and y_val is not None:
-                eval_set = [(X_train, y_train), (X_val, y_val)]
                 model.fit(
                     X_train, y_train, 
                     sample_weight=sample_weights,
-                    eval_set=eval_set,
-                    early_stopping_rounds=80,
+                    eval_set=[(X_train, y_train), (X_val, y_val)],
                     verbose=False
                 )
             else:
@@ -223,6 +221,11 @@ class ModelTraining:
         
         try:
             sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'focal')
+            
+            # Remove conflicting parameters for bayesian bootstrap
+            if 'bootstrap_type' in params and params['bootstrap_type'] == 'Bayesian':
+                if 'subsample' in params:
+                    del params['subsample']
             
             model = cb.CatBoostClassifier(**params)
             
@@ -491,7 +494,7 @@ class ModelTraining:
         top_models = sorted_models[:3]  # Top 3 models only
         
         good_models = []
-        min_score = 0.70  # Increased threshold
+        min_score = 0.70  # Threshold
         
         for name, scores in top_models:
             if name in self.models and self.models[name] is not None and scores['stability'] >= min_score:
@@ -572,7 +575,7 @@ class ModelTraining:
                 best_params, best_score = self.hyperparameter_optimization(
                     X_train, y_train, 'lightgbm', n_trials=Config.OPTUNA_TRIALS
                 )
-                if best_score > 0.6:  # Only use optimized params if they're decent
+                if best_score > 0.6:  # Only use optimal params if they're decent
                     self.train_lightgbm(X_train, y_train, X_val, y_val, best_params)
                 else:
                     self.train_lightgbm(X_train, y_train, X_val, y_val)
