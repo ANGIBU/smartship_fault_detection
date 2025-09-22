@@ -25,14 +25,9 @@ warnings.filterwarnings('ignore')
 from config import Config
 from utils import timer, calculate_macro_f1, save_model, save_joblib, setup_logging
 
-class MacroF1Scorer:
-    """Custom scorer for direct Macro F1 optimization"""
-    
-    def __init__(self, n_classes):
-        self.n_classes = n_classes
-    
-    def __call__(self, y_true, y_pred):
-        return f1_score(y_true, y_pred, average='macro', zero_division=0)
+def macro_f1_score(y_true, y_pred):
+    """Simple function for macro F1 scoring"""
+    return f1_score(y_true, y_pred, average='macro', zero_division=0)
 
 class WeightCalculator:
     """Dynamic class weight calculation"""
@@ -72,7 +67,6 @@ class ModelTraining:
         self.cv_scores = {}
         self.ensemble_models = {}
         self.logger = setup_logging()
-        self.scorer = MacroF1Scorer(Config.N_CLASSES)
         self.weight_calculator = WeightCalculator()
         
     def _create_cv_strategy(self, X, y):
@@ -177,36 +171,13 @@ class ModelTraining:
         try:
             sample_weights, class_weight_dict = self._calculate_class_weights(y_train)
             
-            # XGBoost version compatibility
-            try:
-                # Try new XGBoost API (2.0+)
-                model = xgb.XGBClassifier(**params)
-                
-                if X_val is not None and y_val is not None:
-                    model.fit(
-                        X_train, y_train,
-                        sample_weight=sample_weights,
-                        eval_set=[(X_val, y_val)],
-                        callbacks=[xgb.callback.EarlyStopping(rounds=50, save_best=True)],
-                        verbose=False
-                    )
-                else:
-                    model.fit(X_train, y_train, sample_weight=sample_weights)
-                    
-            except (TypeError, AttributeError):
-                # Fallback to older XGBoost API
-                model = xgb.XGBClassifier(**params)
-                
-                if X_val is not None and y_val is not None:
-                    model.fit(
-                        X_train, y_train,
-                        sample_weight=sample_weights,
-                        eval_set=[(X_val, y_val)],
-                        early_stopping_rounds=50,
-                        verbose=False
-                    )
-                else:
-                    model.fit(X_train, y_train, sample_weight=sample_weights)
+            model = xgb.XGBClassifier(**params)
+            
+            if X_val is not None and y_val is not None:
+                # Simple fit without early stopping to ensure compatibility
+                model.fit(X_train, y_train, sample_weight=sample_weights)
+            else:
+                model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['xgboost'] = model
             self.logger.info("XGBoost model training completed")
@@ -432,11 +403,11 @@ class ModelTraining:
             print(f"Cross-validating {model_name}")
             
             try:
-                # Use custom scoring function
+                # Use macro_f1_score function directly
                 cv_scores = cross_val_score(
                     model, X_train, y_train,
                     cv=cv_strategy,
-                    scoring=make_scorer(self.scorer),
+                    scoring=make_scorer(macro_f1_score),
                     n_jobs=1
                 )
                 
@@ -589,7 +560,7 @@ class ModelTraining:
                     ensemble_cv = cross_val_score(
                         ensemble, X_train, y_train,
                         cv=cv_strategy,
-                        scoring=make_scorer(self.scorer),
+                        scoring=make_scorer(macro_f1_score),
                         n_jobs=1
                     )
                     
