@@ -16,7 +16,6 @@ from pathlib import Path
 import gc
 import os
 from scipy.stats import zscore
-from scipy.signal import find_peaks
 
 warnings.filterwarnings('ignore')
 
@@ -51,11 +50,9 @@ def load_data(file_path, chunk_size=None):
         if not file_path.exists():
             raise FileNotFoundError(f"파일을 찾을 수 없습니다: {file_path}")
         
-        # 파일 크기 확인
         file_size_mb = file_path.stat().st_size / (1024 * 1024)
         
         if chunk_size and file_size_mb > 100:
-            # 큰 파일은 청크 단위로 로드
             chunks = []
             for chunk in pd.read_csv(file_path, chunksize=chunk_size):
                 chunks.append(chunk)
@@ -77,81 +74,30 @@ def save_model(model, file_path):
         
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # 먼저 joblib로 시도
+        # joblib 우선 시도
         try:
             joblib.dump(model, file_path, compress=3)
-            print(f"모델 저장 완료 (joblib): {file_path}")
+            file_size_mb = file_path.stat().st_size / (1024 * 1024)
+            print(f"모델 저장 완료 (joblib): {file_path} ({file_size_mb:.1f}MB)")
             return
         except Exception as joblib_error:
             print(f"joblib 저장 실패: {joblib_error}")
         
-        # joblib 실패시 pickle로 시도
+        # pickle 시도
         try:
             with open(file_path, 'wb') as f:
                 pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
             
-            # 파일 크기 확인
             file_size_mb = file_path.stat().st_size / (1024 * 1024)
             print(f"모델 저장 완료 (pickle): {file_path} ({file_size_mb:.1f}MB)")
             
         except Exception as pickle_error:
             print(f"pickle 저장 실패: {pickle_error}")
-            
-            # 특수한 경우: 앙상블 모델일 때
-            if hasattr(model, 'estimators_'):
-                print("앙상블 모델 감지, 개별 저장 시도")
-                try:
-                    # 개별 모델들 저장
-                    estimators_data = []
-                    for name, estimator in model.estimators_:
-                        estimator_path = file_path.parent / f"{name}_estimator.pkl"
-                        try:
-                            joblib.dump(estimator, estimator_path, compress=3)
-                            estimators_data.append((name, str(estimator_path)))
-                            print(f"개별 모델 저장: {name}")
-                        except Exception as est_error:
-                            print(f"개별 모델 저장 실패 {name}: {est_error}")
-                    
-                    # 메타 정보 저장
-                    meta_info = {
-                        'model_type': type(model).__name__,
-                        'estimators': estimators_data,
-                        'voting': getattr(model, 'voting', 'soft'),
-                        'weights': getattr(model, 'weights', None)
-                    }
-                    
-                    meta_path = file_path.parent / 'ensemble_meta.pkl'
-                    with open(meta_path, 'wb') as f:
-                        pickle.dump(meta_info, f)
-                    
-                    print(f"앙상블 메타 정보 저장: {meta_path}")
-                    return
-                    
-                except Exception as ensemble_error:
-                    print(f"앙상블 개별 저장 실패: {ensemble_error}")
-            
-            # 마지막 시도: 모델 상태만 저장
-            try:
-                model_state = {
-                    'model_type': type(model).__name__,
-                    'model_params': getattr(model, 'get_params', lambda: {})(),
-                    'classes_': getattr(model, 'classes_', None),
-                    'n_classes_': getattr(model, 'n_classes_', None)
-                }
-                
-                state_path = file_path.parent / 'model_state.pkl'
-                with open(state_path, 'wb') as f:
-                    pickle.dump(model_state, f)
-                
-                print(f"모델 상태 저장: {state_path}")
-                
-            except Exception as state_error:
-                print(f"모델 상태 저장도 실패: {state_error}")
-                raise Exception(f"모든 저장 방법 실패: pickle={pickle_error}, joblib={joblib_error}")
+            raise Exception(f"모델 저장 실패: joblib={joblib_error}, pickle={pickle_error}")
         
     except Exception as e:
         print(f"모델 저장 실패: {e}")
-        print("경고: 모델 저장에 실패했지만 프로그램을 계속 진행합니다.")
+        raise
 
 def load_model(file_path):
     """모델 로드"""
@@ -162,7 +108,7 @@ def load_model(file_path):
         if not file_path.exists():
             raise FileNotFoundError(f"모델 파일을 찾을 수 없습니다: {file_path}")
         
-        # 먼저 joblib로 시도
+        # joblib 우선 시도
         try:
             model = joblib.load(file_path)
             print(f"모델 로드 완료 (joblib): {file_path}")
@@ -170,7 +116,7 @@ def load_model(file_path):
         except:
             pass
         
-        # joblib 실패시 pickle로 시도
+        # pickle 시도
         try:
             with open(file_path, 'rb') as f:
                 model = pickle.load(f)
@@ -178,34 +124,6 @@ def load_model(file_path):
             return model
         except:
             pass
-        
-        # 앙상블 메타 정보 확인
-        meta_path = file_path.parent / 'ensemble_meta.pkl'
-        if meta_path.exists():
-            print("앙상블 메타 정보 발견, 재구성 시도")
-            try:
-                with open(meta_path, 'rb') as f:
-                    meta_info = pickle.load(f)
-                
-                estimators = []
-                for name, estimator_path in meta_info['estimators']:
-                    try:
-                        estimator = joblib.load(estimator_path)
-                        estimators.append((name, estimator))
-                    except:
-                        print(f"개별 모델 로드 실패: {name}")
-                
-                if estimators:
-                    from sklearn.ensemble import VotingClassifier
-                    model = VotingClassifier(
-                        estimators=estimators,
-                        voting=meta_info.get('voting', 'soft'),
-                        weights=meta_info.get('weights')
-                    )
-                    print("앙상블 모델 재구성 완료")
-                    return model
-            except Exception as e:
-                print(f"앙상블 재구성 실패: {e}")
         
         raise Exception("모든 로드 방법 실패")
         
@@ -221,7 +139,6 @@ def save_joblib(obj, file_path, compress=3):
         file_path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(obj, file_path, compress=compress)
         
-        # 파일 크기 확인
         if file_path.exists():
             file_size_mb = file_path.stat().st_size / (1024 * 1024)
             print(f"객체 저장 완료: {file_path} ({file_size_mb:.1f}MB)")
@@ -271,7 +188,6 @@ def calculate_all_metrics(y_true, y_pred):
         }
     except Exception as e:
         print(f"메트릭 계산 중 오류: {e}")
-        # 기본값 반환
         metrics = {
             'accuracy': 0.0,
             'macro_f1': 0.0,
@@ -309,215 +225,6 @@ def calculate_class_metrics(y_true, y_pred, labels=None):
     except Exception as e:
         print(f"클래스 메트릭 계산 중 오류: {e}")
         return []
-
-def analyze_sensor_data_quality(df, sensor_columns):
-    """센서 데이터 품질 분석"""
-    print("센서 데이터 품질 분석")
-    
-    quality_report = {
-        'total_sensors': len(sensor_columns),
-        'sensor_stats': {},
-        'quality_issues': [],
-        'recommendations': []
-    }
-    
-    for sensor in sensor_columns:
-        if sensor not in df.columns:
-            quality_report['quality_issues'].append(f"센서 누락: {sensor}")
-            continue
-        
-        sensor_data = df[sensor]
-        
-        # 기본 통계
-        stats = {
-            'count': len(sensor_data),
-            'missing': sensor_data.isnull().sum(),
-            'zeros': (sensor_data == 0).sum(),
-            'mean': sensor_data.mean(),
-            'std': sensor_data.std(),
-            'min': sensor_data.min(),
-            'max': sensor_data.max(),
-            'range': sensor_data.max() - sensor_data.min()
-        }
-        
-        # 이상치 검출
-        if len(sensor_data.dropna()) > 0:
-            z_scores = np.abs(zscore(sensor_data.dropna()))
-            outliers = np.sum(z_scores > 3)
-            stats['outliers'] = outliers
-            stats['outlier_rate'] = outliers / len(sensor_data) * 100
-        else:
-            stats['outliers'] = 0
-            stats['outlier_rate'] = 0
-        
-        # 변동성 분석
-        if stats['std'] > 0:
-            stats['cv'] = stats['std'] / abs(stats['mean']) if stats['mean'] != 0 else np.inf
-        else:
-            stats['cv'] = 0
-        
-        # 신호 안정성
-        if len(sensor_data) > 1:
-            diff = np.diff(sensor_data.fillna(sensor_data.mean()))
-            stats['signal_stability'] = np.std(diff)
-        else:
-            stats['signal_stability'] = 0
-        
-        quality_report['sensor_stats'][sensor] = stats
-        
-        # 품질 문제 식별
-        if stats['missing'] > len(sensor_data) * 0.1:
-            quality_report['quality_issues'].append(f"{sensor}: 결측치 비율 높음 ({stats['missing']/len(sensor_data)*100:.1f}%)")
-        
-        if stats['outlier_rate'] > 5:
-            quality_report['quality_issues'].append(f"{sensor}: 이상치 비율 높음 ({stats['outlier_rate']:.1f}%)")
-        
-        if stats['cv'] > 2:
-            quality_report['quality_issues'].append(f"{sensor}: 변동성 매우 높음 (CV: {stats['cv']:.2f})")
-        
-        if stats['zeros'] > len(sensor_data) * 0.2:
-            quality_report['quality_issues'].append(f"{sensor}: 0값 비율 높음 ({stats['zeros']/len(sensor_data)*100:.1f}%)")
-    
-    # 권장사항 생성
-    if quality_report['quality_issues']:
-        quality_report['recommendations'].append("센서 데이터 정제 필요")
-        quality_report['recommendations'].append("이상치 처리 방법 검토")
-        quality_report['recommendations'].append("센서 캘리브레이션 확인")
-    
-    return quality_report
-
-def detect_sensor_anomalies(df, sensor_columns, method='zscore'):
-    """센서 이상 감지"""
-    print(f"센서 이상 감지 ({method})")
-    
-    anomaly_report = {
-        'method': method,
-        'sensor_anomalies': {},
-        'total_anomalies': 0
-    }
-    
-    for sensor in sensor_columns:
-        if sensor not in df.columns:
-            continue
-        
-        sensor_data = df[sensor].dropna()
-        if len(sensor_data) == 0:
-            continue
-        
-        if method == 'zscore':
-            # Z-score 기반 이상 감지
-            z_scores = np.abs(zscore(sensor_data))
-            anomaly_mask = z_scores > 3
-            anomaly_indices = sensor_data.index[anomaly_mask]
-            
-        elif method == 'iqr':
-            # IQR 기반 이상 감지
-            Q1 = sensor_data.quantile(0.25)
-            Q3 = sensor_data.quantile(0.75)
-            IQR = Q3 - Q1
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
-            
-            anomaly_mask = (sensor_data < lower_bound) | (sensor_data > upper_bound)
-            anomaly_indices = sensor_data.index[anomaly_mask]
-            
-        elif method == 'peaks':
-            # 피크 기반 이상 감지
-            peaks, _ = find_peaks(sensor_data, height=sensor_data.mean() + 2*sensor_data.std())
-            anomaly_indices = sensor_data.index[peaks]
-            
-        else:
-            anomaly_indices = []
-        
-        anomaly_count = len(anomaly_indices)
-        anomaly_rate = anomaly_count / len(sensor_data) * 100
-        
-        anomaly_report['sensor_anomalies'][sensor] = {
-            'count': anomaly_count,
-            'rate': anomaly_rate,
-            'indices': anomaly_indices.tolist()
-        }
-        
-        anomaly_report['total_anomalies'] += anomaly_count
-        
-        if anomaly_rate > 5:
-            print(f"{sensor}: 이상 비율 높음 ({anomaly_rate:.1f}%)")
-    
-    return anomaly_report
-
-def analyze_sensor_correlations(df, sensor_groups):
-    """센서 그룹별 상관관계 분석"""
-    print("센서 그룹별 상관관계 분석")
-    
-    correlation_report = {
-        'group_correlations': {},
-        'cross_group_correlations': {},
-        'high_correlations': [],
-        'low_correlations': []
-    }
-    
-    # 그룹 내 상관관계
-    for group_name, sensors in sensor_groups.items():
-        valid_sensors = [s for s in sensors if s in df.columns]
-        if len(valid_sensors) < 2:
-            continue
-        
-        group_data = df[valid_sensors]
-        corr_matrix = group_data.corr()
-        
-        # 상삼각행렬만 추출
-        upper_triangle = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-        
-        # 통계 계산
-        correlations = upper_triangle.stack().dropna()
-        
-        group_stats = {
-            'sensors': valid_sensors,
-            'mean_correlation': correlations.mean(),
-            'max_correlation': correlations.max(),
-            'min_correlation': correlations.min(),
-            'std_correlation': correlations.std()
-        }
-        
-        correlation_report['group_correlations'][group_name] = group_stats
-        
-        # 높은 상관관계 (>0.8) 식별
-        high_corr = correlations[correlations > 0.8]
-        for (sensor1, sensor2), corr_val in high_corr.items():
-            correlation_report['high_correlations'].append({
-                'group': group_name,
-                'sensor1': sensor1,
-                'sensor2': sensor2,
-                'correlation': corr_val
-            })
-        
-        # 낮은 상관관계 (<0.1) 식별
-        low_corr = correlations[correlations < 0.1]
-        for (sensor1, sensor2), corr_val in low_corr.items():
-            correlation_report['low_correlations'].append({
-                'group': group_name,
-                'sensor1': sensor1,
-                'sensor2': sensor2,
-                'correlation': corr_val
-            })
-    
-    # 그룹 간 상관관계
-    group_names = list(sensor_groups.keys())
-    for i, group1 in enumerate(group_names):
-        for j, group2 in enumerate(group_names[i+1:], i+1):
-            sensors1 = [s for s in sensor_groups[group1] if s in df.columns]
-            sensors2 = [s for s in sensor_groups[group2] if s in df.columns]
-            
-            if len(sensors1) > 0 and len(sensors2) > 0:
-                # 각 그룹의 대표값 (평균) 계산
-                group1_mean = df[sensors1].mean(axis=1)
-                group2_mean = df[sensors2].mean(axis=1)
-                
-                cross_corr = group1_mean.corr(group2_mean)
-                
-                correlation_report['cross_group_correlations'][f'{group1}_vs_{group2}'] = cross_corr
-    
-    return correlation_report
 
 def print_classification_metrics(y_true, y_pred, class_names=None, target_names=None):
     """분류 성능 메트릭 출력"""
@@ -558,7 +265,6 @@ def create_cv_folds(X, y, n_splits=5, random_state=42):
         return list(skf.split(X, y))
     except Exception as e:
         print(f"CV 폴드 생성 실패: {e}")
-        # 기본 분할 반환
         from sklearn.model_selection import train_test_split
         indices = np.arange(len(X))
         folds = []
@@ -610,7 +316,7 @@ def timer(func):
                 seconds = elapsed % 60
                 print(f"{func.__name__} 실행 시간: {minutes}분 {seconds:.2f}초")
             
-            if memory_increase > 10:  # 10MB 이상 증가시 출력
+            if memory_increase > 50:  # 50MB 이상 증가시 출력
                 print(f"메모리 증가: {memory_increase:.1f}MB")
             
             return result
@@ -663,7 +369,7 @@ def check_data_quality(df, feature_columns):
         for dtype, count in dtype_counts.items():
             print(f"  {dtype}: {count}개 컬럼")
         
-        # 기본 통계 (수치형 컬럼만)
+        # 기본 통계
         if len(numeric_cols) > 0:
             print(f"\n기본 통계 (수치형 컬럼 {len(numeric_cols)}개):")
             stats = df[numeric_cols].describe()
@@ -721,7 +427,7 @@ def validate_predictions(y_pred, n_classes, sample_ids=None):
             print(f"예측 개수: {len(y_pred)}")
             
             if len(sample_ids) != len(y_pred):
-                print("경고: 샘플 개수와 예측 개수가 일치하지 않습니다.")
+                print("경고: 샘플 개수와 예측 개수가 일치하지 않습니다")
         
         # 예측값 범위 확인
         min_pred = np.min(y_pred)
@@ -735,7 +441,7 @@ def validate_predictions(y_pred, n_classes, sample_ids=None):
         # 유효성 검사
         is_valid = True
         if min_pred < 0 or max_pred >= n_classes:
-            print(f"경고: 예측값이 유효한 범위(0 ~ {n_classes-1})를 벗어났습니다.")
+            print(f"경고: 예측값이 유효한 범위(0 ~ {n_classes-1})를 벗어났습니다")
             is_valid = False
         
         # 분포 확인
@@ -821,8 +527,8 @@ def analyze_class_distribution(y, class_names=None):
         
         # 불균형 정도 계산
         max_count = max(counts)
-        min_count = min(counts)
-        imbalance_ratio = max_count / min_count if min_count > 0 else float('inf')
+        min_count = min(counts[counts > 0]) if np.any(counts > 0) else 1
+        imbalance_ratio = max_count / min_count
         
         print(f"\n분포 통계:")
         print(f"  최대 클래스 크기: {max_count}")
@@ -948,44 +654,70 @@ def optimize_dataframe_memory(df):
         print(f"메모리 최적화 실패: {e}")
         return df
 
-def generate_system_report(validation_scores, cv_scores, memory_info, execution_time):
-    """시스템 성능 보고서 생성"""
-    print("\n" + "=" * 60)
-    print("시스템 성능 보고서")
-    print("=" * 60)
-    
-    # 성능 점수 분석
-    if validation_scores:
-        print("\n검증 점수 분석:")
-        for val_type, score in validation_scores.items():
-            print(f"  {val_type:15s}: {score:.4f}")
+def validate_data_consistency(train_df, test_df, feature_columns):
+    """훈련 데이터와 테스트 데이터 일관성 검증"""
+    try:
+        print("데이터 일관성 검증")
         
-        scores = list(validation_scores.values())
-        mean_score = np.mean(scores)
-        std_score = np.std(scores)
-        print(f"  평균 점수       : {mean_score:.4f}")
-        print(f"  표준편차        : {std_score:.4f}")
-        print(f"  안정성 지수     : {1-std_score:.4f}")
-    
-    # 교차 검증 결과
-    if cv_scores:
-        print("\n교차 검증 결과:")
-        for model_name, scores in cv_scores.items():
-            stability_score = scores.get('stability_score', scores['mean'])
-            print(f"  {model_name:15s}: {stability_score:.4f}")
-    
-    # 메모리 사용량
-    if memory_info:
-        print("\n메모리 사용량:")
-        print(f"  초기 메모리     : {memory_info['initial']:.2f} MB")
-        print(f"  최종 메모리     : {memory_info['final']:.2f} MB")
-        print(f"  증가량          : {memory_info['increase']:.2f} MB")
-    
-    # 실행 시간
-    if execution_time:
-        print(f"\n총 실행 시간     : {format_time(execution_time)}")
-    
-    # 시스템 리소스
-    resource_info = check_system_resources()
-    
-    print("=" * 60)
+        # 피처 컬럼 확인
+        train_features = set(train_df.columns) & set(feature_columns)
+        test_features = set(test_df.columns) & set(feature_columns)
+        
+        missing_in_test = train_features - test_features
+        missing_in_train = test_features - train_features
+        
+        if missing_in_test:
+            print(f"테스트 데이터에서 누락된 피처: {missing_in_test}")
+        
+        if missing_in_train:
+            print(f"훈련 데이터에서 누락된 피처: {missing_in_train}")
+        
+        # 데이터 타입 일관성 확인
+        common_features = train_features & test_features
+        type_mismatches = []
+        
+        for feature in common_features:
+            if train_df[feature].dtype != test_df[feature].dtype:
+                type_mismatches.append({
+                    'feature': feature,
+                    'train_type': train_df[feature].dtype,
+                    'test_type': test_df[feature].dtype
+                })
+        
+        if type_mismatches:
+            print("데이터 타입 불일치:")
+            for mismatch in type_mismatches:
+                print(f"  {mismatch['feature']}: 훈련={mismatch['train_type']}, 테스트={mismatch['test_type']}")
+        
+        # 통계적 분포 비교
+        distribution_differences = []
+        
+        for feature in list(common_features)[:10]:  # 상위 10개만 확인
+            train_mean = train_df[feature].mean()
+            test_mean = test_df[feature].mean()
+            train_std = train_df[feature].std()
+            test_std = test_df[feature].std()
+            
+            mean_diff = abs(train_mean - test_mean) / (abs(train_mean) + 1e-8)
+            std_diff = abs(train_std - test_std) / (abs(train_std) + 1e-8)
+            
+            if mean_diff > 0.1 or std_diff > 0.1:  # 10% 이상 차이
+                distribution_differences.append({
+                    'feature': feature,
+                    'mean_diff': mean_diff,
+                    'std_diff': std_diff
+                })
+        
+        if distribution_differences:
+            print("분포 차이가 큰 피처 (상위 5개):")
+            for diff in distribution_differences[:5]:
+                print(f"  {diff['feature']}: 평균 차이 {diff['mean_diff']:.3f}, 표준편차 차이 {diff['std_diff']:.3f}")
+        
+        is_consistent = (len(missing_in_test) == 0 and len(missing_in_train) == 0 and 
+                        len(type_mismatches) == 0 and len(distribution_differences) < 5)
+        
+        return is_consistent
+        
+    except Exception as e:
+        print(f"데이터 일관성 검증 실패: {e}")
+        return False

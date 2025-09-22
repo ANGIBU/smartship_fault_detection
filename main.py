@@ -5,13 +5,15 @@ import numpy as np
 import warnings
 import sys
 import time
+import psutil
 warnings.filterwarnings('ignore')
 
 from config import Config
 from data_processor import DataProcessor
 from model_training import ModelTraining
-from prediction import Prediction
+from prediction import PredictionProcessor
 from utils import setup_logging, memory_usage_check, timer
+from sklearn.model_selection import train_test_split
 
 def main():
     """메인 실행 함수"""
@@ -22,6 +24,16 @@ def main():
     initial_memory = memory_usage_check()
     
     try:
+        # 하드웨어 사양에 맞춘 설정 조정
+        available_memory_gb = psutil.virtual_memory().available / (1024**3)
+        cpu_cores = psutil.cpu_count()
+        Config.update_for_hardware(available_memory_gb, cpu_cores)
+        
+        print(f"시스템 설정:")
+        print(f"  가용 메모리: {available_memory_gb:.1f}GB")
+        print(f"  CPU 코어: {cpu_cores}개")
+        print(f"  작업 프로세스: {Config.N_JOBS}개")
+        
         # 설정 검증
         config_errors = Config.validate_config()
         if config_errors:
@@ -37,54 +49,37 @@ def main():
         
         processor = DataProcessor()
         X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
-            use_feature_selection=True,
-            scaling_method='robust',
-            balance_classes=True
+            use_resampling=True,
+            scaling_method=Config.SCALING_METHOD
         )
         
         print(f"훈련 데이터 형태: {X_train.shape}")
         print(f"테스트 데이터 형태: {X_test.shape}")
-        print(f"타겟 분포: {pd.Series(y_train).value_counts().sort_index().head(10).values}")
+        print(f"타겟 분포 (상위 10개): {pd.Series(y_train).value_counts().sort_index().head(10).to_dict()}")
         
-        # 데이터 크기에 따른 설정 조정
-        adjustments = Config.adjust_for_data_size(len(X_train), X_train.shape[1])
-        if adjustments:
-            print(f"데이터 크기 기반 조정: {adjustments}")
-        
-        # 2. 시간 기반 검증 전략 설정
+        # 2. 검증 전략 설정
         print("\n" + "=" * 50)
-        print("2단계: 시간 기반 검증 전략 설정")
+        print("2단계: 검증 전략 설정")
         print("=" * 50)
         
-        # 시간 기반 분할
-        validation_config = Config.get_cross_validation_strategy('time_based')
+        # Stratified 분할로 검증 세트 생성
+        X_train_split, X_val, y_train_split, y_val = train_test_split(
+            X_train, y_train,
+            test_size=Config.VALIDATION_SIZE,
+            random_state=Config.RANDOM_STATE,
+            stratify=y_train
+        )
         
-        n_samples = len(X_train)
-        train_ratio = validation_config['train_ratio']
-        val_ratio = validation_config['val_ratio']
-        holdout_ratio = validation_config['holdout_ratio']
-        
-        train_end = int(n_samples * train_ratio)
-        val_end = int(n_samples * (train_ratio + val_ratio))
-        
-        # 시간 순서 기반 분할
-        X_train_time = X_train.iloc[:train_end]
-        X_val_time = X_train.iloc[train_end:val_end]
-        X_holdout = X_train.iloc[val_end:]
-        
-        y_train_time = y_train.iloc[:train_end]
-        y_val_time = y_train.iloc[train_end:val_end]
-        y_holdout = y_train.iloc[val_end:]
-        
-        print(f"시간 기반 분할:")
-        print(f"  훈련 세트: {X_train_time.shape}")
-        print(f"  검증 세트: {X_val_time.shape}")
-        print(f"  홀드아웃 세트: {X_holdout.shape}")
+        print(f"Stratified 분할:")
+        print(f"  훈련 세트: {X_train_split.shape}")
+        print(f"  검증 세트: {X_val.shape}")
         
         # 검증 세트 분포 확인
-        val_distribution = pd.Series(y_val_time).value_counts().sort_index()
-        print(f"\n시간 기반 검증 세트 클래스 분포 (상위 10개):")
-        print(val_distribution.head(10))
+        val_distribution = pd.Series(y_val).value_counts().sort_index()
+        print(f"\n검증 세트 클래스 분포 (상위 10개):")
+        for class_id, count in val_distribution.head(10).items():
+            percentage = (count / len(y_val)) * 100
+            print(f"  클래스 {class_id}: {count}개 ({percentage:.1f}%)")
         
         # 3. 모델 훈련
         print("\n" + "=" * 50)
@@ -93,10 +88,21 @@ def main():
         
         trainer = ModelTraining()
         
-        # 시간 기반 검증으로 모델 훈련
+        # 확률 보정을 위한 작은 검증 세트 분리
+        X_train_final, X_calibration, y_train_final, y_calibration = train_test_split(
+            X_train_split, y_train_split,
+            test_size=0.1,
+            random_state=Config.RANDOM_STATE,
+            stratify=y_train_split
+        )
+        
+        print(f"최종 훈련 세트: {X_train_final.shape}")
+        print(f"보정 세트: {X_calibration.shape}")
+        
+        # 모델 훈련
         models, best_model = trainer.train_all_models(
-            X_train_time, y_train_time,
-            X_val_time, y_val_time,
+            X_train_final, y_train_final,
+            X_calibration, y_calibration,
             use_optimization=True
         )
         
@@ -106,88 +112,69 @@ def main():
         
         # 4. 검증 수행
         print("\n" + "=" * 50)
-        print("4단계: 시간 기반 검증 수행")
+        print("4단계: 모델 검증")
         print("=" * 50)
         
-        validation_scores = {}
-        prediction_results = {}
+        validation_results = {}
         
-        # 시간 기반 검증
         if best_model is not None:
-            time_predictor = Prediction(best_model)
-            time_predictions = time_predictor.predict(X_val_time)
-            time_metrics = time_predictor.validate_predictions(y_val_time)
+            predictor = PredictionProcessor(best_model)
             
-            if time_metrics:
-                print(f"시간 기반 검증 Macro F1: {time_metrics['macro_f1']:.4f}")
-                validation_scores['time_based'] = time_metrics['macro_f1']
-                prediction_results['time_based'] = {
-                    'predictions': time_predictions,
-                    'metrics': time_metrics
-                }
+            # 모델 확률 보정
+            predictor.calibrate_model(X_calibration, y_calibration)
+            
+            # 검증 세트 예측
+            val_predictions = predictor.predict(X_val, use_calibrated=True)
+            val_metrics = predictor.validate_predictions(y_val)
+            
+            if val_metrics:
+                print(f"검증 Macro F1: {val_metrics['macro_f1']:.4f}")
+                validation_results['validation'] = val_metrics
+                
+                # 클래스별 성능 분석
+                low_performance_classes = val_metrics.get('low_performance_classes', [])
+                if low_performance_classes:
+                    print(f"\n성능이 낮은 클래스: {len(low_performance_classes)}개")
+                    for cls_info in low_performance_classes[:5]:
+                        print(f"  클래스 {cls_info['class']}: F1={cls_info['f1_score']:.3f}")
         
-        # 홀드아웃 검증
-        if best_model is not None:
-            holdout_predictor = Prediction(best_model)
-            holdout_predictions = holdout_predictor.predict(X_holdout)
-            holdout_metrics = holdout_predictor.validate_predictions(y_holdout)
-            
-            if holdout_metrics:
-                print(f"홀드아웃 검증 Macro F1: {holdout_metrics['macro_f1']:.4f}")
-                validation_scores['holdout'] = holdout_metrics['macro_f1']
-                prediction_results['holdout'] = {
-                    'predictions': holdout_predictions,
-                    'metrics': holdout_metrics
-                }
-        
-        # 검증 결과 안정성 분석
-        if len(validation_scores) >= 2:
-            print(f"\n검증 점수 안정성 분석:")
-            scores = list(validation_scores.values())
-            mean_score = np.mean(scores)
-            std_score = np.std(scores)
-            
-            print(f"  평균 검증 점수: {mean_score:.4f}")
-            print(f"  검증 점수 표준편차: {std_score:.4f}")
-            print(f"  안정성 지수: {1 - std_score:.4f}")
-            
-            if std_score > 0.03:
-                print(f"  주의: 검증 점수 변동성 감지 (표준편차 > 0.03)")
-                print(f"  권장사항: 시간 기반 검증 결과 우선 사용")
-            
-            # 시간 기반 검증과 다른 검증의 차이 분석
-            if 'time_based' in validation_scores:
-                time_score = validation_scores['time_based']
-                for val_type, score in validation_scores.items():
-                    if val_type != 'time_based':
-                        diff = abs(time_score - score)
-                        print(f"  시간 기반 vs {val_type}: 차이 {diff:.4f}")
-                        if diff > 0.05:
-                            print(f"    주의: {val_type} 검증에서 과적합 위험")
-        
-        # 5. 최종 모델 훈련
+        # 5. 테스트 예측
         print("\n" + "=" * 50)
-        print("5단계: 최종 모델 훈련")
+        print("5단계: 테스트 예측")
         print("=" * 50)
         
-        # 전체 데이터로 최종 모델 재훈련
-        final_trainer = ModelTraining()
-        
-        print("전체 데이터로 최종 모델 재훈련")
-        final_models, final_best_model = final_trainer.train_stable_models(X_train, y_train)
-        
-        if final_best_model is not None:
-            final_predictor = Prediction(final_best_model)
-            test_predictions = final_predictor.predict(X_test)
-            distribution_info = final_predictor.analyze_prediction_distribution()
-        elif best_model is not None:
-            # 기존 모델 사용
-            predictor = Prediction(best_model)
-            test_predictions = predictor.predict(X_test)
-            distribution_info = predictor.analyze_prediction_distribution()
-            final_predictor = predictor
+        if best_model is not None:
+            # 전체 훈련 데이터로 최종 모델 재훈련
+            final_trainer = ModelTraining()
+            
+            # 최고 성능 모델과 동일한 타입으로 재훈련
+            best_model_type = type(best_model).__name__
+            print(f"전체 데이터로 {best_model_type} 재훈련")
+            
+            if 'LGBMClassifier' in best_model_type:
+                final_model = final_trainer.train_lightgbm(X_train, y_train)
+            elif 'XGBClassifier' in best_model_type:
+                final_model = final_trainer.train_xgboost(X_train, y_train)
+            elif 'CatBoost' in best_model_type:
+                final_model = final_trainer.train_catboost(X_train, y_train)
+            elif 'RandomForest' in best_model_type:
+                final_model = final_trainer.train_random_forest(X_train, y_train)
+            elif 'ExtraTrees' in best_model_type:
+                final_model = final_trainer.train_extra_trees(X_train, y_train)
+            else:
+                # 앙상블인 경우 기존 모델 사용
+                final_model = best_model
+            
+            if final_model is not None:
+                final_predictor = PredictionProcessor(final_model)
+                test_predictions = final_predictor.predict(X_test, use_calibrated=False)
+                distribution_info = final_predictor.analyze_prediction_distribution()
+            else:
+                final_predictor = predictor
+                test_predictions = predictor.predict(X_test, use_calibrated=True)
+                distribution_info = predictor.analyze_prediction_distribution()
         else:
-            print("경고: 사용 가능한 모델이 없습니다.")
+            print("사용 가능한 모델이 없습니다")
             return None
         
         # 6. 제출 파일 생성
@@ -197,76 +184,48 @@ def main():
         
         submission_df = final_predictor.create_submission_file(
             test_ids,
-            apply_balancing=True
+            apply_balancing=True,
+            confidence_threshold=0.6
         )
         
         if submission_df is not None:
             print(f"제출 파일 생성 완료: {Config.RESULT_FILE}")
             print(f"제출 파일 형태: {submission_df.shape}")
         
-        # 7. 성능 분석 및 최종 보고서
+        # 7. 성능 분석
         print("\n" + "=" * 50)
         print("7단계: 성능 분석")
         print("=" * 50)
         
         # 교차 검증 결과 출력
         if trainer.cv_scores:
-            print("\n교차 검증 결과 (안정성 기준)")
+            print("\n교차 검증 결과 (안정성 순위):")
             sorted_scores = sorted(trainer.cv_scores.items(),
-                                 key=lambda x: x[1].get('stability_score', x[1]['mean']),
+                                 key=lambda x: x[1].get('stability', x[1]['mean']),
                                  reverse=True)
             for model_name, scores in sorted_scores:
-                stability_score = scores.get('stability_score', scores['mean'])
+                stability_score = scores.get('stability', scores['mean'])
                 std_score = scores['std']
-                print(f"{model_name:20s}: {stability_score:.4f} (표준편차: {std_score:.4f})")
+                print(f"  {model_name:15s}: {stability_score:.4f} (±{std_score:.4f})")
+        
+        # 피처 중요도 분석
+        feature_importance = trainer.get_feature_importance()
+        if feature_importance:
+            print("\n피처 중요도 (상위 모델):")
+            for model_name, importance in list(feature_importance.items())[:2]:
+                if len(importance) > 0:
+                    print(f"  {model_name}: 평균 중요도 {np.mean(importance):.4f}")
         
         # 최종 성능 예측
-        print(f"\n최종 성능 예측")
-        if validation_scores:
-            # 시간 기반 검증을 가장 신뢰할 만한 지표로 사용
-            time_based_score = validation_scores.get('time_based', 0)
-            if time_based_score > 0:
-                # 보수적 성능 예측
-                conservative_estimate = time_based_score * 0.95
-                print(f"시간 기반 검증 점수: {time_based_score:.4f}")
-                print(f"보수적 성능 예측: {conservative_estimate:.4f}")
-                print(f"목표 성능 (0.80)까지: {0.80 - conservative_estimate:.4f}점 필요")
-                
-                # 성능 방향 제시
-                if conservative_estimate < 0.65:
-                    print("권장사항: 피처 엔지니어링 및 데이터 품질 점검")
-                elif conservative_estimate < 0.72:
-                    print("권장사항: 모델 복잡도 조정 및 앙상블 기법 적용")
-                elif conservative_estimate < 0.78:
-                    print("권장사항: 하이퍼파라미터 세밀 조정")
-                else:
-                    print("권장사항: 현재 접근 방법 유지")
+        print(f"\n성능 예측:")
+        if validation_results and 'validation' in validation_results:
+            val_score = validation_results['validation']['macro_f1']
+            conservative_estimate = val_score * 0.95
+            print(f"  검증 Macro F1: {val_score:.4f}")
+            print(f"  예상 성능: {conservative_estimate:.4f}")
+            print(f"  목표 대비: {0.83 - conservative_estimate:.4f}점 {'달성' if conservative_estimate >= 0.83 else '부족'}")
         
-        # 클래스별 성능 분석
-        if 'time_based' in prediction_results:
-            time_metrics = prediction_results['time_based']['metrics']
-            if time_metrics and 'class_metrics' in time_metrics:
-                class_metrics = time_metrics['class_metrics']
-                if class_metrics and len(class_metrics) > 0:
-                    low_performance_classes = []
-                    for cm in class_metrics:
-                        if isinstance(cm, dict):
-                            f1_score = cm.get('f1_score', cm.get('f1', cm.get('f1_score', 0)))
-                            if f1_score < Config.CLASS_PERFORMANCE_THRESHOLD:
-                                low_performance_classes.append(cm)
-                    
-                    if low_performance_classes:
-                        print(f"\n성능이 낮은 클래스 ({len(low_performance_classes)}개):")
-                        for i, cm in enumerate(low_performance_classes[:5]):
-                            class_id = cm.get('class', i)
-                            f1_score = cm.get('f1_score', cm.get('f1', 0))
-                            support = cm.get('support', 0)
-                            print(f"  클래스 {class_id:2d}: F1={f1_score:.3f}, 지원={support:4d}")
-                        
-                        if len(low_performance_classes) > 5:
-                            print(f"  ... (총 {len(low_performance_classes)}개)")
-        
-        # 시스템 리소스 사용량 분석
+        # 시스템 리소스 사용량
         final_memory = memory_usage_check()
         memory_increase = final_memory - initial_memory
         total_time = time.time() - start_time
@@ -282,14 +241,15 @@ def main():
         print(f"총 실행 시간: {total_time/60:.1f}분")
         
         # 검증 점수 요약
-        if validation_scores:
-            for val_type, score in validation_scores.items():
-                print(f"{val_type} 검증 점수: {score:.4f}")
+        if validation_results:
+            for val_type, result in validation_results.items():
+                if 'macro_f1' in result:
+                    print(f"{val_type} Macro F1: {result['macro_f1']:.4f}")
         
         if trainer.cv_scores:
-            best_cv_scores = [score.get('stability_score', score['mean']) 
+            best_cv_scores = [score.get('stability', score['mean']) 
                              for score in trainer.cv_scores.values()]
-            best_cv_score = max(best_cv_scores)
+            best_cv_score = max(best_cv_scores) if best_cv_scores else 0
             print(f"최고 안정성 점수: {best_cv_score:.4f}")
         
         logger.info("시스템 정상 완료")
@@ -298,12 +258,12 @@ def main():
         result_dict = {
             'models': models,
             'best_model': best_model,
-            'final_model': final_best_model,
-            'validation_scores': validation_scores,
+            'final_model': final_model if 'final_model' in locals() else best_model,
+            'validation_results': validation_results,
             'cv_scores': trainer.cv_scores,
             'distribution_info': distribution_info,
             'submission_df': submission_df,
-            'prediction_results': prediction_results,
+            'feature_importance': feature_importance,
             'memory_usage': {
                 'initial': initial_memory,
                 'final': final_memory,
@@ -321,76 +281,6 @@ def main():
         traceback.print_exc()
         raise
 
-def run_stable_mode():
-    """안정적인 실행 모드"""
-    print("=" * 50)
-    print("   안정적인 실행 모드")
-    print("=" * 50)
-    
-    try:
-        Config.create_directories()
-        
-        # 데이터 전처리
-        processor = DataProcessor()
-        X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
-            use_feature_selection=True,
-            scaling_method='robust',
-            balance_classes=False  # 안정 모드에서는 균형 조정 비활성화
-        )
-        
-        # 시간 기반 검증 데이터 분할
-        n_samples = len(X_train)
-        train_end = int(n_samples * 0.7)
-        val_end = int(n_samples * 0.85)
-        
-        X_train_stable = X_train.iloc[:train_end]
-        X_val_stable = X_train.iloc[train_end:val_end]
-        X_holdout_stable = X_train.iloc[val_end:]
-        
-        y_train_stable = y_train.iloc[:train_end]
-        y_val_stable = y_train.iloc[train_end:val_end]
-        y_holdout_stable = y_train.iloc[val_end:]
-        
-        print(f"안정적인 분할:")
-        print(f"  훈련 세트: {X_train_stable.shape}")
-        print(f"  검증 세트: {X_val_stable.shape}")
-        print(f"  홀드아웃 세트: {X_holdout_stable.shape}")
-        
-        # 안정적인 모델 훈련
-        trainer = ModelTraining()
-        models, best_model = trainer.train_stable_models(X_train_stable, y_train_stable)
-        
-        print(f"훈련된 모델 개수: {len(models)}")
-        if best_model is not None:
-            print(f"최고 성능 모델: {type(best_model).__name__}")
-        
-        # 검증 수행
-        if best_model is not None:
-            predictor = Prediction(best_model)
-            
-            # 홀드아웃 검증
-            holdout_predictions = predictor.predict(X_holdout_stable)
-            holdout_metrics = predictor.validate_predictions(y_holdout_stable)
-            
-            if holdout_metrics:
-                print(f"홀드아웃 검증 Macro F1: {holdout_metrics['macro_f1']:.4f}")
-            
-            # 테스트 예측
-            test_predictions = predictor.predict(X_test)
-            submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
-        else:
-            submission_df = None
-        
-        print(f"안정적인 실행 완료: {Config.RESULT_FILE}")
-        
-        return models, best_model, submission_df
-        
-    except Exception as e:
-        print(f"안정적인 실행 중 오류 발생: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
-
 def run_fast_mode():
     """빠른 실행 모드"""
     print("=" * 50)
@@ -400,16 +290,14 @@ def run_fast_mode():
     try:
         Config.create_directories()
         
-        # 데이터 전처리 (간소화)
+        # 기본 설정으로 데이터 전처리
         processor = DataProcessor()
         X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
-            use_feature_selection=True,
-            scaling_method='robust',
-            balance_classes=False
+            use_resampling=False,
+            scaling_method='robust'
         )
         
         # 단순 분할
-        from sklearn.model_selection import train_test_split
         X_train_split, X_val, y_train_split, y_val = train_test_split(
             X_train, y_train,
             test_size=0.2,
@@ -420,7 +308,7 @@ def run_fast_mode():
         print(f"훈련 세트: {X_train_split.shape}")
         print(f"검증 세트: {X_val.shape}")
         
-        # 빠른 모델 훈련 (튜닝 비활성화)
+        # 기본 모델 훈련 (튜닝 비활성화)
         trainer = ModelTraining()
         models, best_model = trainer.train_all_models(
             X_train_split, y_train_split,
@@ -434,9 +322,11 @@ def run_fast_mode():
         
         # 테스트 예측
         if best_model is not None:
-            predictor = Prediction(best_model)
-            test_predictions = predictor.predict(X_test)
-            submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
+            predictor = PredictionProcessor(best_model)
+            test_predictions = predictor.predict(X_test, use_calibrated=False)
+            submission_df = predictor.create_submission_file(
+                test_ids, apply_balancing=True
+            )
         else:
             submission_df = None
         
@@ -450,53 +340,55 @@ def run_fast_mode():
         traceback.print_exc()
         raise
 
-def run_evaluation_mode():
-    """평가 모드 (기존 모델 로드 후 평가)"""
+def run_validation_mode():
+    """검증 모드"""
     print("=" * 50)
-    print("   평가 모드")
+    print("   검증 모드")
     print("=" * 50)
     
     try:
         Config.create_directories()
         
-        # 기존 모델 로드
-        predictor = Prediction()
-        predictor.load_trained_model()
-        
         # 데이터 전처리
         processor = DataProcessor()
         X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
-            use_feature_selection=True,
-            scaling_method='robust',
-            balance_classes=False
+            use_resampling=True,
+            scaling_method=Config.SCALING_METHOD
         )
         
-        # 시간 기반 분할로 평가
-        n_samples = len(X_train)
-        train_end = int(n_samples * 0.8)
+        # 검증용 분할
+        X_train_split, X_val, y_train_split, y_val = train_test_split(
+            X_train, y_train,
+            test_size=0.3,
+            random_state=Config.RANDOM_STATE,
+            stratify=y_train
+        )
         
-        X_eval = X_train.iloc[train_end:]
-        y_eval = y_train.iloc[train_end:]
+        print(f"검증용 훈련 세트: {X_train_split.shape}")
+        print(f"검증 세트: {X_val.shape}")
         
-        print(f"평가 세트: {X_eval.shape}")
+        # 모델 훈련
+        trainer = ModelTraining()
+        models, best_model = trainer.train_all_models(
+            X_train_split, y_train_split,
+            use_optimization=True
+        )
         
-        # 평가 수행
-        eval_predictions = predictor.predict(X_eval)
-        eval_metrics = predictor.validate_predictions(y_eval)
+        # 검증 수행
+        if best_model is not None:
+            predictor = PredictionProcessor(best_model)
+            val_predictions = predictor.predict(X_val, use_calibrated=False)
+            val_metrics = predictor.validate_predictions(y_val)
+            
+            if val_metrics:
+                print(f"검증 Macro F1: {val_metrics['macro_f1']:.4f}")
         
-        if eval_metrics:
-            print(f"평가 Macro F1: {eval_metrics['macro_f1']:.4f}")
+        print(f"검증 모드 완료")
         
-        # 테스트 예측
-        test_predictions = predictor.predict(X_test)
-        submission_df = predictor.create_submission_file(test_ids, apply_balancing=True)
-        
-        print(f"평가 모드 완료: {Config.RESULT_FILE}")
-        
-        return eval_metrics, submission_df
+        return val_metrics if 'val_metrics' in locals() else None
         
     except Exception as e:
-        print(f"평가 모드 실행 중 오류 발생: {e}")
+        print(f"검증 모드 실행 중 오류 발생: {e}")
         import traceback
         traceback.print_exc()
         raise
@@ -505,17 +397,14 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         mode = sys.argv[1].lower()
         
-        if mode == "stable":
-            run_stable_mode()
-        elif mode == "fast":
+        if mode == "fast":
             run_fast_mode()
-        elif mode == "eval":
-            run_evaluation_mode()
+        elif mode == "validation":
+            run_validation_mode()
         else:
             print("사용법:")
-            print("  python main.py         # 전체 실행")
-            print("  python main.py stable  # 안정적인 실행")
-            print("  python main.py fast    # 빠른 실행")
-            print("  python main.py eval    # 평가 모드")
+            print("  python main.py           # 전체 실행")
+            print("  python main.py fast      # 빠른 실행")
+            print("  python main.py validation # 검증 모드")
     else:
         main()

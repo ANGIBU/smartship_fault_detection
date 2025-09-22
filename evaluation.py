@@ -2,11 +2,9 @@
 
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.metrics import confusion_matrix, classification_report, f1_score, precision_recall_fscore_support
 from sklearn.metrics import accuracy_score, roc_auc_score, average_precision_score
-from sklearn.model_selection import learning_curve, validation_curve
+from sklearn.model_selection import cross_val_score
 from sklearn.calibration import calibration_curve
 import warnings
 warnings.filterwarnings('ignore')
@@ -17,13 +15,12 @@ from utils import timer, calculate_all_metrics, save_results
 class ModelEvaluator:
     def __init__(self):
         self.evaluation_results = {}
-        self.plots_saved = []
         self.class_reports = {}
         
     @timer
-    def comprehensive_evaluation(self, model, X_test, y_test, model_name="Model"):
-        """종합적 모델 평가"""
-        print(f"=== {model_name} 종합 평가 시작 ===")
+    def evaluate_model(self, model, X_test, y_test, model_name="Model"):
+        """모델 평가 수행"""
+        print(f"=== {model_name} 평가 시작 ===")
         
         # 예측 수행
         y_pred = model.predict(X_test)
@@ -50,9 +47,6 @@ class ModelEvaluator:
         # 클래스 불균형 분석
         imbalance_metrics = self._analyze_class_imbalance(y_test, y_pred)
         
-        # 시간 기반 성능 분석
-        temporal_metrics = self._analyze_temporal_performance(y_test, y_pred)
-        
         # 결과 저장
         evaluation_result = {
             'model_name': model_name,
@@ -61,7 +55,6 @@ class ModelEvaluator:
             'confusion_metrics': confusion_metrics,
             'probability_metrics': prob_metrics,
             'imbalance_metrics': imbalance_metrics,
-            'temporal_metrics': temporal_metrics,
             'predictions': y_pred,
             'probabilities': y_proba
         }
@@ -205,11 +198,6 @@ class ModelEvaluator:
     def _analyze_calibration(self, y_true, y_proba):
         """확률 보정 분석"""
         try:
-            # 전체적인 보정 분석
-            y_pred_proba = np.max(y_proba, axis=1)
-            y_pred = np.argmax(y_proba, axis=1)
-            
-            # 이진 분류로 변환하여 보정 분석
             calibration_results = {}
             
             for class_id in range(min(5, Config.N_CLASSES)):  # 상위 5개 클래스만
@@ -333,61 +321,6 @@ class ModelEvaluator:
             'total_samples': total_samples
         }
     
-    def _analyze_temporal_performance(self, y_true, y_pred):
-        """시간적 성능 분석"""
-        try:
-            # 시간 순서대로 성능 변화 분석
-            window_size = max(100, len(y_true) // 10)  # 최소 100개 또는 전체의 10%
-            performance_over_time = []
-            
-            for i in range(0, len(y_true) - window_size + 1, window_size // 2):
-                end_idx = min(i + window_size, len(y_true))
-                window_true = y_true[i:end_idx]
-                window_pred = y_pred[i:end_idx]
-                
-                window_f1 = f1_score(window_true, window_pred, average='macro', zero_division=0)
-                window_acc = accuracy_score(window_true, window_pred)
-                
-                performance_over_time.append({
-                    'start_idx': i,
-                    'end_idx': end_idx,
-                    'f1_score': float(window_f1),
-                    'accuracy': float(window_acc)
-                })
-            
-            # 성능 변화 트렌드 분석
-            if len(performance_over_time) > 1:
-                f1_scores = [p['f1_score'] for p in performance_over_time]
-                
-                # 선형 트렌드 계산
-                x = np.arange(len(f1_scores))
-                trend_slope = np.polyfit(x, f1_scores, 1)[0]
-                
-                # 성능 안정성 (표준편차)
-                f1_stability = np.std(f1_scores)
-                
-                temporal_analysis = {
-                    'performance_over_time': performance_over_time,
-                    'trend_slope': float(trend_slope),
-                    'stability': float(f1_stability),
-                    'mean_performance': float(np.mean(f1_scores)),
-                    'performance_range': float(np.max(f1_scores) - np.min(f1_scores))
-                }
-            else:
-                temporal_analysis = {
-                    'performance_over_time': performance_over_time,
-                    'trend_slope': 0.0,
-                    'stability': 0.0,
-                    'mean_performance': 0.0,
-                    'performance_range': 0.0
-                }
-            
-            return temporal_analysis
-            
-        except Exception as e:
-            print(f"시간적 성능 분석 실패: {e}")
-            return {}
-    
     def _print_evaluation_summary(self, evaluation_result):
         """평가 결과 요약 출력"""
         model_name = evaluation_result['model_name']
@@ -441,14 +374,6 @@ class ModelEvaluator:
                 print(f"과대 예측된 클래스: {over_pred}")
             if under_pred:
                 print(f"과소 예측된 클래스: {under_pred}")
-        
-        # 시간적 성능
-        temporal_metrics = evaluation_result.get('temporal_metrics', {})
-        if temporal_metrics:
-            trend_slope = temporal_metrics.get('trend_slope', 0)
-            stability = temporal_metrics.get('stability', 0)
-            print(f"성능 트렌드: {'향상' if trend_slope > 0.001 else '악화' if trend_slope < -0.001 else '안정'}")
-            print(f"성능 안정성: {stability:.4f}")
     
     @timer
     def compare_models(self, model_results):
@@ -474,10 +399,6 @@ class ModelEvaluator:
             if result.get('imbalance_metrics'):
                 imbalance_metrics = result['imbalance_metrics']
                 row['pred_imbalance_ratio'] = imbalance_metrics['pred_imbalance_ratio']
-            
-            if result.get('temporal_metrics'):
-                temporal_metrics = result['temporal_metrics']
-                row['performance_stability'] = temporal_metrics.get('stability', 0)
             
             comparison_data.append(row)
         
@@ -505,7 +426,7 @@ class ModelEvaluator:
         print(f"=== {model_name} 클래스별 성능 분석 ===")
         
         if not class_metrics:
-            print("클래스 메트릭이 없습니다.")
+            print("클래스 메트릭이 없습니다")
             return None
         
         class_df = pd.DataFrame(class_metrics)
@@ -550,7 +471,7 @@ class ModelEvaluator:
         print(f"=== {model_name} 혼동 패턴 분석 ===")
         
         if not confusion_metrics:
-            print("혼동 행렬 메트릭이 없습니다.")
+            print("혼동 행렬 메트릭이 없습니다")
             return None
         
         # 가장 많이 혼동되는 클래스 쌍
@@ -583,7 +504,7 @@ class ModelEvaluator:
         prob_metrics = evaluation_result.get('probability_metrics')
         
         if not prob_metrics:
-            print(f"{model_name}: 확률 메트릭이 없습니다.")
+            print(f"{model_name}: 확률 메트릭이 없습니다")
             return None
         
         print(f"=== {model_name} 예측 신뢰도 분석 ===")
@@ -626,8 +547,8 @@ class ModelEvaluator:
         return prob_metrics
     
     @timer
-    def generate_detailed_report(self, evaluation_result, save_path=None):
-        """상세 평가 보고서 생성"""
+    def generate_report(self, evaluation_result, save_path=None):
+        """평가 보고서 생성"""
         model_name = evaluation_result['model_name']
         
         report_lines = []
@@ -717,22 +638,6 @@ class ModelEvaluator:
             if under_pred:
                 report_lines.append(f"과소 예측된 클래스: {under_pred}")
         
-        # 6. 시간적 성능 분석
-        temporal_metrics = evaluation_result.get('temporal_metrics')
-        if temporal_metrics:
-            report_lines.append(f"\n6. 시간적 성능 분석")
-            report_lines.append("-" * 30)
-            
-            trend_slope = temporal_metrics.get('trend_slope', 0)
-            stability = temporal_metrics.get('stability', 0)
-            mean_perf = temporal_metrics.get('mean_performance', 0)
-            
-            report_lines.append(f"평균 성능: {mean_perf:.4f}")
-            report_lines.append(f"성능 안정성: {stability:.4f}")
-            
-            trend_desc = "향상" if trend_slope > 0.001 else "악화" if trend_slope < -0.001 else "안정"
-            report_lines.append(f"성능 트렌드: {trend_desc}")
-        
         # 보고서 텍스트 생성
         report_text = "\n".join(report_lines)
         
@@ -754,7 +659,7 @@ class ModelEvaluator:
             output_dir = Config.MODEL_DIR
         
         if not self.evaluation_results:
-            print("저장할 평가 결과가 없습니다.")
+            print("저장할 평가 결과가 없습니다")
             return
         
         # 모든 평가 결과를 CSV로 저장
@@ -779,11 +684,6 @@ class ModelEvaluator:
                 imbalance_metrics = result['imbalance_metrics']
                 row['pred_imbalance_ratio'] = imbalance_metrics['pred_imbalance_ratio']
             
-            if result.get('temporal_metrics'):
-                temporal_metrics = result['temporal_metrics']
-                row['performance_stability'] = temporal_metrics.get('stability', 0)
-                row['performance_trend'] = temporal_metrics.get('trend_slope', 0)
-            
             all_results.append(row)
         
         if all_results:
@@ -804,7 +704,7 @@ class ModelEvaluator:
     def create_performance_summary(self):
         """성능 요약 생성"""
         if not self.evaluation_results:
-            print("평가 결과가 없습니다.")
+            print("평가 결과가 없습니다")
             return None
         
         summary = {
@@ -894,11 +794,6 @@ class ModelEvaluator:
                     entropy_stats = best_result['probability_metrics']['entropy_analysis']['entropy_stats']
                     if entropy_stats['mean_entropy'] < 1.0:
                         recommendation['key_strengths'].append("낮은 예측 불확실성")
-            
-            if best_result.get('temporal_metrics'):
-                stability = best_result['temporal_metrics'].get('stability', 1.0)
-                if stability < 0.05:
-                    recommendation['key_strengths'].append("높은 시간적 안정성")
             
             # 우려사항 분석
             if best_result.get('imbalance_metrics'):
