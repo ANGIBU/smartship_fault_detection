@@ -13,7 +13,7 @@ try:
     CATBOOST_AVAILABLE = True
 except ImportError:
     CATBOOST_AVAILABLE = False
-    print("CatBoost 라이브러리가 설치되지 않았습니다")
+    print("CatBoost library not installed")
 
 import optuna
 from optuna.pruners import MedianPruner
@@ -26,7 +26,7 @@ from config import Config
 from utils import timer, calculate_macro_f1, save_model, save_joblib, setup_logging
 
 class MacroF1Scorer:
-    """Macro F1 직접 최적화를 위한 커스텀 스코어러"""
+    """Custom scorer for direct Macro F1 optimization"""
     
     def __init__(self, n_classes):
         self.n_classes = n_classes
@@ -35,31 +35,31 @@ class MacroF1Scorer:
         return f1_score(y_true, y_pred, average='macro', zero_division=0)
 
 class WeightCalculator:
-    """동적 클래스 가중치 계산"""
+    """Dynamic class weight calculation"""
     
     @staticmethod
     def compute_focal_weights(y, alpha=1.0, gamma=2.0):
-        """Focal Loss 기반 가중치 계산"""
+        """Calculate Focal Loss based weights"""
         class_counts = np.bincount(y, minlength=Config.N_CLASSES)
         total_samples = len(y)
         
-        # 빈도 기반 가중치
+        # Frequency-based weights
         freq_weights = total_samples / (Config.N_CLASSES * class_counts + 1e-8)
         
-        # Focal 가중치 적용
+        # Apply focal weights
         focal_weights = alpha * np.power(1 - (class_counts / total_samples), gamma)
         
-        # 결합된 가중치
+        # Combined weights
         combined_weights = freq_weights * focal_weights
         
-        # 정규화
+        # Normalize
         combined_weights = combined_weights / np.mean(combined_weights)
         
         return dict(enumerate(combined_weights))
     
     @staticmethod
     def compute_balanced_weights(y):
-        """균형 가중치 계산"""
+        """Calculate balanced weights"""
         classes = np.unique(y)
         class_weights = compute_class_weight('balanced', classes=classes, y=y)
         return dict(zip(classes, class_weights))
@@ -76,7 +76,7 @@ class ModelTraining:
         self.weight_calculator = WeightCalculator()
         
     def _create_cv_strategy(self, X, y):
-        """Stratified K-Fold 교차 검증 전략 생성"""
+        """Create Stratified K-Fold cross-validation strategy"""
         return StratifiedKFold(
             n_splits=Config.CV_FOLDS, 
             shuffle=True, 
@@ -84,7 +84,7 @@ class ModelTraining:
         )
     
     def _calculate_class_weights(self, y, method='focal'):
-        """클래스 가중치 계산"""
+        """Calculate class weights"""
         if method == 'focal':
             class_weight_dict = self.weight_calculator.compute_focal_weights(
                 y, Config.FOCAL_LOSS_ALPHA, Config.FOCAL_LOSS_GAMMA
@@ -97,8 +97,8 @@ class ModelTraining:
     
     @timer
     def train_lightgbm(self, X_train, y_train, X_val=None, y_val=None, params=None):
-        """LightGBM 모델 훈련"""
-        print("LightGBM 모델 훈련 시작")
+        """Train LightGBM model"""
+        print("Starting LightGBM model training")
         
         if params is None:
             params = Config.LGBM_PARAMS.copy()
@@ -106,7 +106,7 @@ class ModelTraining:
         try:
             sample_weights, class_weight_dict = self._calculate_class_weights(y_train)
             
-            # 클래스 가중치를 파라미터에 적용
+            # Apply class weights to parameters
             params['class_weight'] = class_weight_dict
             
             model = lgb.LGBMClassifier(**params)
@@ -126,18 +126,18 @@ class ModelTraining:
                 model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['lightgbm'] = model
-            self.logger.info("LightGBM 모델 훈련 완료")
+            self.logger.info("LightGBM model training completed")
             return model
             
         except Exception as e:
-            print(f"LightGBM 훈련 중 오류: {e}")
-            self.logger.error(f"LightGBM 훈련 실패: {e}")
+            print(f"Error during LightGBM training: {e}")
+            self.logger.error(f"LightGBM training failed: {e}")
             return None
     
     @timer
     def train_xgboost(self, X_train, y_train, X_val=None, y_val=None, params=None):
-        """XGBoost 모델 훈련"""
-        print("XGBoost 모델 훈련 시작")
+        """Train XGBoost model"""
+        print("Starting XGBoost model training")
         
         if params is None:
             params = Config.XGB_PARAMS.copy()
@@ -159,22 +159,22 @@ class ModelTraining:
                 model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['xgboost'] = model
-            self.logger.info("XGBoost 모델 훈련 완료")
+            self.logger.info("XGBoost model training completed")
             return model
             
         except Exception as e:
-            print(f"XGBoost 훈련 중 오류: {e}")
-            self.logger.error(f"XGBoost 훈련 실패: {e}")
+            print(f"Error during XGBoost training: {e}")
+            self.logger.error(f"XGBoost training failed: {e}")
             return None
     
     @timer
     def train_catboost(self, X_train, y_train, X_val=None, y_val=None, params=None):
-        """CatBoost 모델 훈련"""
+        """Train CatBoost model"""
         if not CATBOOST_AVAILABLE:
-            print("CatBoost 라이브러리가 없어 훈련 건너뜀")
+            print("CatBoost library not available, skipping training")
             return None
             
-        print("CatBoost 모델 훈련 시작")
+        print("Starting CatBoost model training")
         
         if params is None:
             params = Config.CAT_PARAMS.copy()
@@ -196,18 +196,18 @@ class ModelTraining:
                 model.fit(X_train, y_train, sample_weight=sample_weights, verbose=False)
             
             self.models['catboost'] = model
-            self.logger.info("CatBoost 모델 훈련 완료")
+            self.logger.info("CatBoost model training completed")
             return model
             
         except Exception as e:
-            print(f"CatBoost 훈련 중 오류: {e}")
-            self.logger.error(f"CatBoost 훈련 실패: {e}")
+            print(f"Error during CatBoost training: {e}")
+            self.logger.error(f"CatBoost training failed: {e}")
             return None
     
     @timer
     def train_random_forest(self, X_train, y_train, params=None):
-        """Random Forest 모델 훈련"""
-        print("Random Forest 모델 훈련 시작")
+        """Train Random Forest model"""
+        print("Starting Random Forest model training")
         
         if params is None:
             params = Config.RF_PARAMS.copy()
@@ -220,18 +220,18 @@ class ModelTraining:
             model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['random_forest'] = model
-            self.logger.info("Random Forest 모델 훈련 완료")
+            self.logger.info("Random Forest model training completed")
             return model
             
         except Exception as e:
-            print(f"Random Forest 훈련 중 오류: {e}")
-            self.logger.error(f"Random Forest 훈련 실패: {e}")
+            print(f"Error during Random Forest training: {e}")
+            self.logger.error(f"Random Forest training failed: {e}")
             return None
     
     @timer
     def train_extra_trees(self, X_train, y_train, params=None):
-        """Extra Trees 모델 훈련"""
-        print("Extra Trees 모델 훈련 시작")
+        """Train Extra Trees model"""
+        print("Starting Extra Trees model training")
         
         try:
             if params is None:
@@ -244,18 +244,18 @@ class ModelTraining:
             model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['extra_trees'] = model
-            self.logger.info("Extra Trees 모델 훈련 완료")
+            self.logger.info("Extra Trees model training completed")
             return model
             
         except Exception as e:
-            print(f"Extra Trees 훈련 중 오류: {e}")
-            self.logger.error(f"Extra Trees 훈련 실패: {e}")
+            print(f"Error during Extra Trees training: {e}")
+            self.logger.error(f"Extra Trees training failed: {e}")
             return None
     
     @timer
     def hyperparameter_optimization(self, X_train, y_train, model_type='lightgbm', n_trials=100):
-        """하이퍼파라미터 튜닝"""
-        print(f"{model_type} 하이퍼파라미터 튜닝 시작")
+        """Hyperparameter tuning"""
+        print(f"Starting {model_type} hyperparameter tuning")
         
         def objective(trial):
             try:
@@ -324,7 +324,7 @@ class ModelTraining:
                     sample_weights, _ = self._calculate_class_weights(y_train)
                     model = cb.CatBoostClassifier(**params)
                 
-                # Stratified K-Fold 교차 검증
+                # Stratified K-Fold cross-validation
                 cv_strategy = self._create_cv_strategy(X_train, y_train)
                 cv_scores = []
                 
@@ -348,7 +348,7 @@ class ModelTraining:
                 return np.mean(cv_scores)
                 
             except Exception as e:
-                print(f"튜닝 시행 중 오류: {e}")
+                print(f"Error during tuning trial: {e}")
                 return 0.0
         
         sampler = TPESampler(seed=Config.RANDOM_STATE)
@@ -357,27 +357,27 @@ class ModelTraining:
         study = optuna.create_study(direction='maximize', sampler=sampler, pruner=pruner)
         study.optimize(objective, n_trials=n_trials, timeout=Config.OPTUNA_TIMEOUT, show_progress_bar=False)
         
-        print(f"최적 파라미터: {study.best_params}")
-        print(f"최적 점수: {study.best_value:.4f}")
+        print(f"Best parameters: {study.best_params}")
+        print(f"Best score: {study.best_value:.4f}")
         
         return study.best_params, study.best_value
     
     @timer
     def cross_validate_models(self, X_train, y_train):
-        """모델 교차 검증 수행"""
-        print("모델 교차 검증 시작")
+        """Perform model cross-validation"""
+        print("Starting model cross-validation")
         
         cv_strategy = self._create_cv_strategy(X_train, y_train)
         
         for model_name, model in self.models.items():
             if model is None:
-                print(f"{model_name} 건너뜀: 모델이 None")
+                print(f"Skipping {model_name}: model is None")
                 continue
                 
-            print(f"{model_name} 교차 검증 중")
+            print(f"Cross-validating {model_name}")
             
             try:
-                # 커스텀 스코어링 함수 사용
+                # Use custom scoring function
                 cv_scores = cross_val_score(
                     model, X_train, y_train,
                     cv=cv_strategy,
@@ -392,35 +392,35 @@ class ModelTraining:
                     'scores': cv_scores,
                     'mean': mean_score,
                     'std': std_score,
-                    'stability': mean_score - std_score  # 안정성 지표
+                    'stability': mean_score - std_score  # Stability metric
                 }
                 
                 print(f"  {model_name}: {mean_score:.4f} (+/- {std_score * 2:.4f})")
                 
             except Exception as e:
-                print(f"  {model_name} 검증 실패: {e}")
+                print(f"  {model_name} validation failed: {e}")
                 continue
         
-        # 최고 성능 모델 선택
+        # Select best performing model
         if self.cv_scores:
             best_model_name = max(self.cv_scores.keys(), key=lambda x: self.cv_scores[x]['stability'])
             if best_model_name in self.models and self.models[best_model_name] is not None:
                 self.best_model = self.models[best_model_name]
                 self.best_score = self.cv_scores[best_model_name]['stability']
                 
-                print(f"최고 안정성 모델: {best_model_name}")
-                print(f"안정성 점수: {self.best_score:.4f}")
+                print(f"Best stability model: {best_model_name}")
+                print(f"Stability score: {self.best_score:.4f}")
         
         return self.cv_scores
     
     @timer
     def create_ensemble(self, X_train, y_train):
-        """앙상블 모델 생성"""
-        print("앙상블 모델 생성 시작")
+        """Create ensemble model"""
+        print("Starting ensemble model creation")
         
-        # 성능 기준으로 모델 선택
+        # Select models based on performance
         good_models = []
-        min_score = 0.55  # 최소 성능 기준
+        min_score = 0.55  # Minimum performance threshold
         
         for name, model in self.models.items():
             if (model is not None and name in self.cv_scores and 
@@ -428,17 +428,17 @@ class ModelTraining:
                 
                 score = self.cv_scores[name]['stability']
                 good_models.append((name, model, score))
-                print(f"{name}: 안정성 점수 {score:.4f}")
+                print(f"{name}: stability score {score:.4f}")
         
         if len(good_models) >= 2:
-            print(f"앙상블에 사용할 모델: {[name for name, _, _ in good_models]}")
+            print(f"Models for ensemble: {[name for name, _, _ in good_models]}")
             
             try:
-                # 성능 기반 가중치 계산
+                # Calculate performance-based weights
                 total_score = sum(score for _, _, score in good_models)
                 model_weights = [score / total_score for _, _, score in good_models]
                 
-                # VotingClassifier 생성
+                # Create VotingClassifier
                 estimators = [(name, model) for name, model, _ in good_models]
                 
                 ensemble = VotingClassifier(
@@ -447,53 +447,53 @@ class ModelTraining:
                     weights=model_weights
                 )
                 
-                # 앙상블 훈련
+                # Train ensemble
                 sample_weights, _ = self._calculate_class_weights(y_train)
                 ensemble.fit(X_train, y_train, sample_weight=sample_weights)
                 
                 self.models['ensemble'] = ensemble
                 self.ensemble_models['voting'] = ensemble
                 
-                print("앙상블 모델 생성 완료")
+                print("Ensemble model creation completed")
                 return ensemble
                 
             except Exception as e:
-                print(f"앙상블 생성 실패: {e}")
+                print(f"Ensemble creation failed: {e}")
                 return None
         else:
-            print("앙상블을 위한 충분한 모델이 없음")
+            print("Insufficient models for ensemble")
             return None
     
     @timer
     def train_all_models(self, X_train, y_train, X_val=None, y_val=None, use_optimization=True):
-        """모든 모델 훈련"""
-        print("전체 모델 훈련 시작")
+        """Train all models"""
+        print("Starting comprehensive model training")
         
-        # 기본 모델들 훈련
+        # Train basic models
         if use_optimization:
-            print("하이퍼파라미터 튜닝 적용")
+            print("Applying hyperparameter tuning")
             
-            # LightGBM 튜닝
+            # LightGBM tuning
             try:
                 best_params, _ = self.hyperparameter_optimization(
                     X_train, y_train, 'lightgbm', n_trials=Config.OPTUNA_TRIALS
                 )
                 self.train_lightgbm(X_train, y_train, X_val, y_val, best_params)
             except Exception as e:
-                print(f"LightGBM 튜닝 실패: {e}")
+                print(f"LightGBM tuning failed: {e}")
                 self.train_lightgbm(X_train, y_train, X_val, y_val)
             
-            # XGBoost 튜닝
+            # XGBoost tuning
             try:
                 best_params, _ = self.hyperparameter_optimization(
                     X_train, y_train, 'xgboost', n_trials=Config.OPTUNA_TRIALS
                 )
                 self.train_xgboost(X_train, y_train, X_val, y_val, best_params)
             except Exception as e:
-                print(f"XGBoost 튜닝 실패: {e}")
+                print(f"XGBoost tuning failed: {e}")
                 self.train_xgboost(X_train, y_train, X_val, y_val)
             
-            # CatBoost 튜닝
+            # CatBoost tuning
             if CATBOOST_AVAILABLE:
                 try:
                     best_params, _ = self.hyperparameter_optimization(
@@ -501,7 +501,7 @@ class ModelTraining:
                     )
                     self.train_catboost(X_train, y_train, X_val, y_val, best_params)
                 except Exception as e:
-                    print(f"CatBoost 튜닝 실패: {e}")
+                    print(f"CatBoost tuning failed: {e}")
                     self.train_catboost(X_train, y_train, X_val, y_val)
         else:
             self.train_lightgbm(X_train, y_train, X_val, y_val)
@@ -509,21 +509,21 @@ class ModelTraining:
             if CATBOOST_AVAILABLE:
                 self.train_catboost(X_train, y_train, X_val, y_val)
         
-        # 추가 모델들 훈련
+        # Train additional models
         self.train_random_forest(X_train, y_train)
         self.train_extra_trees(X_train, y_train)
         
-        # None인 모델 제거
+        # Remove None models
         self.models = {k: v for k, v in self.models.items() if v is not None}
         
-        # 교차 검증
+        # Cross-validation
         if self.models:
             self.cross_validate_models(X_train, y_train)
             
-            # 앙상블 생성
+            # Create ensemble
             ensemble = self.create_ensemble(X_train, y_train)
             
-            # 앙상블 성능 검증
+            # Validate ensemble performance
             if ensemble is not None:
                 try:
                     cv_strategy = self._create_cv_strategy(X_train, y_train)
@@ -545,26 +545,26 @@ class ModelTraining:
                         'stability': stability_score
                     }
                     
-                    print(f"앙상블 안정성 점수: {stability_score:.4f}")
+                    print(f"Ensemble stability score: {stability_score:.4f}")
                     
-                    # 앙상블이 더 안정적이면 업데이트
+                    # Update if ensemble is more stable
                     if stability_score > self.best_score:
                         self.best_model = ensemble
                         self.best_score = stability_score
-                        print("앙상블이 최고 모델로 선택됨")
+                        print("Ensemble selected as best model")
                         
                 except Exception as e:
-                    print(f"앙상블 검증 실패: {e}")
+                    print(f"Ensemble validation failed: {e}")
         
-        # 최고 모델 저장
+        # Save best model
         if self.best_model is not None:
             try:
                 save_model(self.best_model, Config.MODEL_FILE)
-                print(f"최고 모델 저장: {type(self.best_model).__name__}")
+                print(f"Best model saved: {type(self.best_model).__name__}")
             except Exception as e:
-                print(f"모델 저장 실패: {e}")
+                print(f"Model save failed: {e}")
         
-        # CV 결과 저장
+        # Save CV results
         if self.cv_scores:
             cv_results_data = []
             for model_name, scores in self.cv_scores.items():
@@ -579,19 +579,19 @@ class ModelTraining:
             
             try:
                 cv_results_df.to_csv(Config.CV_RESULTS_FILE, index=False)
-                print(f"CV 결과 저장: {Config.CV_RESULTS_FILE}")
+                print(f"CV results saved: {Config.CV_RESULTS_FILE}")
             except Exception as e:
-                print(f"CV 결과 저장 실패: {e}")
+                print(f"CV results save failed: {e}")
         
         gc.collect()
         
-        print("전체 모델 훈련 완료")
-        print(f"훈련된 모델 수: {len(self.models)}")
+        print("Comprehensive model training completed")
+        print(f"Number of trained models: {len(self.models)}")
         
         return self.models, self.best_model
     
     def get_feature_importance(self):
-        """피처 중요도 반환"""
+        """Return feature importance"""
         importance_dict = {}
         
         for model_name, model in self.models.items():
@@ -604,6 +604,6 @@ class ModelTraining:
                 elif hasattr(model, 'get_feature_importance'):
                     importance_dict[model_name] = model.get_feature_importance()
             except Exception as e:
-                print(f"{model_name} 피처 중요도 추출 실패: {e}")
+                print(f"Feature importance extraction failed for {model_name}: {e}")
         
         return importance_dict

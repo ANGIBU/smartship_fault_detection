@@ -19,10 +19,10 @@ class ModelEvaluator:
         
     @timer
     def evaluate_model(self, model, X_test, y_test, model_name="Model"):
-        """모델 평가 수행"""
-        print(f"=== {model_name} 평가 시작 ===")
+        """Perform model evaluation"""
+        print(f"=== {model_name} Evaluation Start ===")
         
-        # 예측 수행
+        # Perform predictions
         y_pred = model.predict(X_test)
         
         if hasattr(model, 'predict_proba'):
@@ -30,24 +30,24 @@ class ModelEvaluator:
         else:
             y_proba = None
         
-        # 기본 메트릭 계산
+        # Calculate basic metrics
         metrics = calculate_all_metrics(y_test, y_pred)
         
-        # 클래스별 성능 분석
+        # Class-wise performance analysis
         class_metrics = self._calculate_class_metrics(y_test, y_pred)
         
-        # 혼동 행렬 분석
+        # Confusion matrix analysis
         confusion_metrics = self._analyze_confusion_matrix(y_test, y_pred)
         
-        # 확률 기반 메트릭
+        # Probability-based metrics
         prob_metrics = {}
         if y_proba is not None:
             prob_metrics = self._calculate_probability_metrics(y_test, y_proba)
         
-        # 클래스 불균형 분석
+        # Class imbalance analysis
         imbalance_metrics = self._analyze_class_imbalance(y_test, y_pred)
         
-        # 결과 저장
+        # Save results
         evaluation_result = {
             'model_name': model_name,
             'basic_metrics': metrics,
@@ -61,13 +61,13 @@ class ModelEvaluator:
         
         self.evaluation_results[model_name] = evaluation_result
         
-        # 결과 출력
+        # Output results
         self._print_evaluation_summary(evaluation_result)
         
         return evaluation_result
     
     def _calculate_class_metrics(self, y_true, y_pred):
-        """클래스별 성능 메트릭 계산"""
+        """Calculate class-wise performance metrics"""
         precision, recall, f1, support = precision_recall_fscore_support(
             y_true, y_pred, average=None, zero_division=0, labels=range(Config.N_CLASSES)
         )
@@ -94,10 +94,10 @@ class ModelEvaluator:
         return class_metrics
     
     def _analyze_confusion_matrix(self, y_true, y_pred):
-        """혼동 행렬 분석"""
+        """Analyze confusion matrix"""
         cm = confusion_matrix(y_true, y_pred, labels=range(Config.N_CLASSES))
         
-        # 정규화된 혼동 행렬
+        # Normalized confusion matrix
         cm_sum = cm.sum(axis=1)
         cm_normalized = np.zeros_like(cm, dtype=float)
         
@@ -105,10 +105,10 @@ class ModelEvaluator:
             if cm_sum[i] > 0:
                 cm_normalized[i] = cm[i] / cm_sum[i]
         
-        # 대각선 성분
+        # Diagonal components
         diagonal_accuracy = np.diag(cm_normalized)
         
-        # 가장 많이 혼동되는 클래스 쌍
+        # Most confused class pairs
         confusion_pairs = []
         for i in range(cm.shape[0]):
             for j in range(cm.shape[1]):
@@ -122,7 +122,7 @@ class ModelEvaluator:
         
         confusion_pairs = sorted(confusion_pairs, key=lambda x: x['count'], reverse=True)
         
-        # 클래스별 정확도
+        # Class-wise accuracy
         class_accuracies = []
         for i in range(Config.N_CLASSES):
             if cm_sum[i] > 0:
@@ -144,11 +144,11 @@ class ModelEvaluator:
         }
     
     def _calculate_probability_metrics(self, y_true, y_proba):
-        """확률 기반 메트릭 계산"""
-        # 각 예측의 최대 확률
+        """Calculate probability-based metrics"""
+        # Maximum probability for each prediction
         max_proba = np.max(y_proba, axis=1)
         
-        # 예측 신뢰도 분석
+        # Prediction confidence analysis
         confidence_thresholds = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
         confidence_analysis = {}
         
@@ -170,7 +170,7 @@ class ModelEvaluator:
                 'accuracy': float(high_conf_acc)
             }
         
-        # 클래스별 평균 확률
+        # Class-wise average probabilities
         class_proba_avg = []
         for class_id in range(Config.N_CLASSES):
             class_mask = y_true == class_id
@@ -180,10 +180,10 @@ class ModelEvaluator:
                 avg_proba = 0.0
             class_proba_avg.append(float(avg_proba))
         
-        # 확률 보정 분석
+        # Probability calibration analysis
         calibration_metrics = self._analyze_calibration(y_true, y_proba)
         
-        # 엔트로피 기반 불확실성 분석
+        # Entropy-based uncertainty analysis
         entropy_analysis = self._analyze_prediction_entropy(y_proba)
         
         return {
@@ -196,12 +196,12 @@ class ModelEvaluator:
         }
     
     def _analyze_calibration(self, y_true, y_proba):
-        """확률 보정 분석"""
+        """Analyze probability calibration"""
         try:
             calibration_results = {}
             
-            for class_id in range(min(5, Config.N_CLASSES)):  # 상위 5개 클래스만
-                if np.sum(y_true == class_id) > 10:  # 충분한 샘플이 있는 경우만
+            for class_id in range(min(5, Config.N_CLASSES)):  # Top 5 classes only
+                if np.sum(y_true == class_id) > 10:  # Only if sufficient samples
                     y_binary = (y_true == class_id).astype(int)
                     y_prob_binary = y_proba[:, class_id]
                     
@@ -210,7 +210,7 @@ class ModelEvaluator:
                             y_binary, y_prob_binary, n_bins=10, strategy='uniform'
                         )
                         
-                        # 보정 오차 계산
+                        # Calculate calibration error
                         calibration_error = np.mean(np.abs(fraction_of_positives - mean_predicted_value))
                         
                         calibration_results[f'class_{class_id}'] = {
@@ -228,13 +228,13 @@ class ModelEvaluator:
             return calibration_results
             
         except Exception as e:
-            print(f"보정 분석 실패: {e}")
+            print(f"Calibration analysis failed: {e}")
             return {}
     
     def _analyze_prediction_entropy(self, y_proba):
-        """예측 엔트로피 분석"""
+        """Analyze prediction entropy"""
         try:
-            # 엔트로피 계산
+            # Calculate entropy
             entropies = []
             for i in range(len(y_proba)):
                 probs = y_proba[i]
@@ -243,7 +243,7 @@ class ModelEvaluator:
             
             entropies = np.array(entropies)
             
-            # 엔트로피 통계
+            # Entropy statistics
             entropy_stats = {
                 'mean_entropy': float(np.mean(entropies)),
                 'std_entropy': float(np.std(entropies)),
@@ -251,7 +251,7 @@ class ModelEvaluator:
                 'max_entropy': float(np.max(entropies))
             }
             
-            # 엔트로피 구간별 분포
+            # Entropy interval distribution
             entropy_bins = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
             bin_counts = np.histogram(entropies, bins=entropy_bins)[0]
             
@@ -267,25 +267,25 @@ class ModelEvaluator:
             }
             
         except Exception as e:
-            print(f"엔트로피 분석 실패: {e}")
+            print(f"Entropy analysis failed: {e}")
             return {}
     
     def _analyze_class_imbalance(self, y_true, y_pred):
-        """클래스 불균형 분석"""
-        # 실제 분포
+        """Analyze class imbalance"""
+        # Actual distribution
         true_counts = np.bincount(y_true, minlength=Config.N_CLASSES)
         pred_counts = np.bincount(y_pred, minlength=Config.N_CLASSES)
         
         total_samples = len(y_true)
         
-        # 불균형 메트릭 계산
+        # Calculate imbalance metrics
         true_distribution = true_counts / total_samples
         pred_distribution = pred_counts / total_samples
         
-        # 분포 차이
+        # Distribution difference
         distribution_diff = np.abs(true_distribution - pred_distribution)
         
-        # 불균형 비율
+        # Imbalance ratios
         true_max = np.max(true_counts)
         true_min = np.min(true_counts[true_counts > 0]) if np.any(true_counts > 0) else 1
         true_imbalance_ratio = true_max / true_min
@@ -294,18 +294,18 @@ class ModelEvaluator:
         pred_min = np.min(pred_counts[pred_counts > 0]) if np.any(pred_counts > 0) else 1
         pred_imbalance_ratio = pred_max / pred_min
         
-        # 누락된 클래스
+        # Missing classes
         missing_true_classes = np.where(true_counts == 0)[0].tolist()
         missing_pred_classes = np.where(pred_counts == 0)[0].tolist()
         
-        # 과소/과대 예측된 클래스
+        # Over/under-predicted classes
         over_predicted = []
         under_predicted = []
         
         for i in range(Config.N_CLASSES):
-            if pred_counts[i] > true_counts[i] * 1.5:  # 50% 이상 과대 예측
+            if pred_counts[i] > true_counts[i] * 1.5:  # 50%+ over-prediction
                 over_predicted.append(i)
-            elif pred_counts[i] < true_counts[i] * 0.5:  # 50% 이상 과소 예측
+            elif pred_counts[i] < true_counts[i] * 0.5:  # 50%+ under-prediction
                 under_predicted.append(i)
         
         return {
@@ -322,18 +322,18 @@ class ModelEvaluator:
         }
     
     def _print_evaluation_summary(self, evaluation_result):
-        """평가 결과 요약 출력"""
+        """Print evaluation result summary"""
         model_name = evaluation_result['model_name']
         metrics = evaluation_result['basic_metrics']
         
-        print(f"\n=== {model_name} 평가 결과 요약 ===")
+        print(f"\n=== {model_name} Evaluation Result Summary ===")
         print(f"Accuracy: {metrics['accuracy']:.4f}")
         print(f"Macro F1: {metrics['macro_f1']:.4f}")
         print(f"Weighted F1: {metrics['weighted_f1']:.4f}")
         print(f"Macro Precision: {metrics['macro_precision']:.4f}")
         print(f"Macro Recall: {metrics['macro_recall']:.4f}")
         
-        # 최고/최저 성능 클래스
+        # Best/worst performing classes
         class_metrics = evaluation_result['class_metrics']
         if class_metrics:
             class_f1_scores = [cm['f1_score'] for cm in class_metrics if cm['support'] > 0]
@@ -347,38 +347,38 @@ class ModelEvaluator:
                 worst_class_idx = next(i for i, cm in enumerate(class_metrics) 
                                      if cm['f1_score'] == worst_f1 and cm['support'] > 0)
                 
-                print(f"\n최고 성능 클래스: {best_class_idx} (F1: {best_f1:.4f})")
-                print(f"최저 성능 클래스: {worst_class_idx} (F1: {worst_f1:.4f})")
+                print(f"\nBest performing class: {best_class_idx} (F1: {best_f1:.4f})")
+                print(f"Worst performing class: {worst_class_idx} (F1: {worst_f1:.4f})")
         
-        # 확률 기반 메트릭
+        # Probability-based metrics
         if evaluation_result['probability_metrics']:
             prob_metrics = evaluation_result['probability_metrics']
             mean_confidence = prob_metrics['mean_max_probability']
-            print(f"평균 예측 신뢰도: {mean_confidence:.4f}")
+            print(f"Average prediction confidence: {mean_confidence:.4f}")
             
             if 'entropy_analysis' in prob_metrics:
                 entropy_stats = prob_metrics['entropy_analysis']['entropy_stats']
-                print(f"평균 예측 엔트로피: {entropy_stats['mean_entropy']:.4f}")
+                print(f"Average prediction entropy: {entropy_stats['mean_entropy']:.4f}")
         
-        # 클래스 불균형 정보
+        # Class imbalance information
         imbalance_metrics = evaluation_result['imbalance_metrics']
         if imbalance_metrics:
             true_ratio = imbalance_metrics['true_imbalance_ratio']
             pred_ratio = imbalance_metrics['pred_imbalance_ratio']
-            print(f"실제 불균형 비율: {true_ratio:.2f}:1")
-            print(f"예측 불균형 비율: {pred_ratio:.2f}:1")
+            print(f"True imbalance ratio: {true_ratio:.2f}:1")
+            print(f"Predicted imbalance ratio: {pred_ratio:.2f}:1")
             
             over_pred = imbalance_metrics['over_predicted_classes']
             under_pred = imbalance_metrics['under_predicted_classes']
             if over_pred:
-                print(f"과대 예측된 클래스: {over_pred}")
+                print(f"Over-predicted classes: {over_pred}")
             if under_pred:
-                print(f"과소 예측된 클래스: {under_pred}")
+                print(f"Under-predicted classes: {under_pred}")
     
     @timer
     def compare_models(self, model_results):
-        """여러 모델 성능 비교"""
-        print("=== 모델 성능 비교 ===")
+        """Compare multiple model performance"""
+        print("=== Model Performance Comparison ===")
         
         comparison_data = []
         
@@ -387,7 +387,7 @@ class ModelEvaluator:
             row = {'model': model_name}
             row.update(metrics)
             
-            # 추가 메트릭
+            # Additional metrics
             if result.get('probability_metrics'):
                 prob_metrics = result['probability_metrics']
                 row['mean_confidence'] = prob_metrics['mean_max_probability']
@@ -406,263 +406,263 @@ class ModelEvaluator:
             comparison_df = pd.DataFrame(comparison_data)
             comparison_df = comparison_df.sort_values('macro_f1', ascending=False)
             
-            print(f"\n모델별 성능 순위:")
+            print(f"\nModel performance ranking:")
             print(comparison_df.to_string(index=False, float_format='%.4f'))
             
-            # 최고 성능 모델
+            # Best performing model
             if not comparison_df.empty:
                 best_model = comparison_df.iloc[0]
-                print(f"\n최고 성능 모델: {best_model['model']}")
+                print(f"\nBest performing model: {best_model['model']}")
                 print(f"Macro F1 Score: {best_model['macro_f1']:.4f}")
         
         return comparison_df if comparison_data else None
     
     @timer
     def analyze_class_performance(self, evaluation_result):
-        """클래스별 성능 분석"""
+        """Analyze class-wise performance"""
         model_name = evaluation_result['model_name']
         class_metrics = evaluation_result['class_metrics']
         
-        print(f"=== {model_name} 클래스별 성능 분석 ===")
+        print(f"=== {model_name} Class-wise Performance Analysis ===")
         
         if not class_metrics:
-            print("클래스 메트릭이 없습니다")
+            print("No class metrics available")
             return None
         
         class_df = pd.DataFrame(class_metrics)
         
-        print(f"\n클래스별 성능 (상위 15개):")
+        print(f"\nClass-wise performance (top 15):")
         display_df = class_df.head(15)
         print(display_df.to_string(index=False, float_format='%.4f'))
         
         if len(class_df) > 15:
-            print(f"... (총 {len(class_df)}개 클래스)")
+            print(f"... (total {len(class_df)} classes)")
         
-        # 성능 통계 (지원 샘플이 있는 클래스만)
+        # Performance statistics (classes with support samples only)
         valid_classes = class_df[class_df['support'] > 0]
         
         if not valid_classes.empty:
-            print(f"\nF1 Score 통계 ({len(valid_classes)}개 클래스):")
-            print(f"평균: {valid_classes['f1_score'].mean():.4f}")
-            print(f"표준편차: {valid_classes['f1_score'].std():.4f}")
-            print(f"최대: {valid_classes['f1_score'].max():.4f}")
-            print(f"최소: {valid_classes['f1_score'].min():.4f}")
+            print(f"\nF1 Score statistics ({len(valid_classes)} classes):")
+            print(f"Mean: {valid_classes['f1_score'].mean():.4f}")
+            print(f"Std: {valid_classes['f1_score'].std():.4f}")
+            print(f"Max: {valid_classes['f1_score'].max():.4f}")
+            print(f"Min: {valid_classes['f1_score'].min():.4f}")
             
-            # 성능이 낮은 클래스 식별
+            # Identify low-performance classes
             low_performance_threshold = Config.CLASS_PERFORMANCE_THRESHOLD
             low_performance_classes = valid_classes[valid_classes['f1_score'] < low_performance_threshold]
             
             if not low_performance_classes.empty:
-                print(f"\n성능이 낮은 클래스 (F1 < {low_performance_threshold}):")
+                print(f"\nLow-performance classes (F1 < {low_performance_threshold}):")
                 low_perf_display = low_performance_classes[['class', 'f1_score', 'support']].head(10)
                 print(low_perf_display.to_string(index=False, float_format='%.4f'))
                 
                 if len(low_performance_classes) > 10:
-                    print(f"... (총 {len(low_performance_classes)}개)")
+                    print(f"... (total {len(low_performance_classes)})")
         
         return class_df
     
     @timer
     def analyze_confusion_patterns(self, evaluation_result):
-        """혼동 패턴 분석"""
+        """Analyze confusion patterns"""
         model_name = evaluation_result['model_name']
         confusion_metrics = evaluation_result['confusion_metrics']
         
-        print(f"=== {model_name} 혼동 패턴 분석 ===")
+        print(f"=== {model_name} Confusion Pattern Analysis ===")
         
         if not confusion_metrics:
-            print("혼동 행렬 메트릭이 없습니다")
+            print("No confusion matrix metrics available")
             return None
         
-        # 가장 많이 혼동되는 클래스 쌍
+        # Most confused class pairs
         top_confusions = confusion_metrics['top_confusions']
         
-        print(f"\n가장 많이 혼동되는 클래스 쌍 (상위 10개):")
+        print(f"\nMost confused class pairs (top 10):")
         for i, confusion in enumerate(top_confusions[:10]):
-            print(f"{i+1:2d}. 클래스 {confusion['true_class']:2d} → {confusion['pred_class']:2d}: "
-                  f"{confusion['count']:4d}회 ({confusion['rate']*100:5.1f}%)")
+            print(f"{i+1:2d}. Class {confusion['true_class']:2d} → {confusion['pred_class']:2d}: "
+                  f"{confusion['count']:4d} times ({confusion['rate']*100:5.1f}%)")
         
-        # 클래스별 정확도
+        # Class-wise accuracy
         class_accuracies = confusion_metrics['class_accuracies']
         
-        print(f"\n클래스별 정확도 (상위 15개):")
+        print(f"\nClass-wise accuracy (top 15):")
         for i, acc_info in enumerate(class_accuracies[:15]):
             class_id = acc_info['class']
             accuracy = acc_info['accuracy']
             total = acc_info['total_samples']
-            print(f"클래스 {class_id:2d}: {accuracy:.4f} (샘플: {total:4d}개)")
+            print(f"Class {class_id:2d}: {accuracy:.4f} (samples: {total:4d})")
         
         if len(class_accuracies) > 15:
-            print(f"... (총 {len(class_accuracies)}개 클래스)")
+            print(f"... (total {len(class_accuracies)} classes)")
         
         return confusion_metrics
     
     @timer
     def analyze_prediction_confidence(self, evaluation_result):
-        """예측 신뢰도 분석"""
+        """Analyze prediction confidence"""
         model_name = evaluation_result['model_name']
         prob_metrics = evaluation_result.get('probability_metrics')
         
         if not prob_metrics:
-            print(f"{model_name}: 확률 메트릭이 없습니다")
+            print(f"{model_name}: No probability metrics available")
             return None
         
-        print(f"=== {model_name} 예측 신뢰도 분석 ===")
+        print(f"=== {model_name} Prediction Confidence Analysis ===")
         
         confidence_analysis = prob_metrics['confidence_analysis']
         
-        print(f"\n신뢰도별 예측 분석:")
-        print(f"{'임계값':>6} {'샘플수':>8} {'비율(%)':>8} {'정확도':>8}")
-        print("-" * 32)
+        print(f"\nConfidence-based prediction analysis:")
+        print(f"{'Threshold':>9} {'Samples':>8} {'Ratio(%)':>8} {'Accuracy':>8}")
+        print("-" * 34)
         
         for threshold, analysis in confidence_analysis.items():
             count = analysis['count']
             percentage = analysis['percentage']
             accuracy = analysis['accuracy']
-            print(f"{threshold:6.2f} {count:8d} {percentage:7.1f} {accuracy:8.4f}")
+            print(f"{threshold:9.2f} {count:8d} {percentage:7.1f} {accuracy:8.4f}")
         
-        # 엔트로피 분석
+        # Entropy analysis
         if 'entropy_analysis' in prob_metrics:
             entropy_analysis = prob_metrics['entropy_analysis']
             entropy_stats = entropy_analysis['entropy_stats']
             
-            print(f"\n예측 불확실성 분석:")
-            print(f"평균 엔트로피: {entropy_stats['mean_entropy']:.4f}")
-            print(f"엔트로피 표준편차: {entropy_stats['std_entropy']:.4f}")
+            print(f"\nPrediction uncertainty analysis:")
+            print(f"Mean entropy: {entropy_stats['mean_entropy']:.4f}")
+            print(f"Entropy std: {entropy_stats['std_entropy']:.4f}")
             
             entropy_distribution = entropy_analysis['entropy_distribution']
-            print(f"\n엔트로피 구간별 분포:")
+            print(f"\nEntropy interval distribution:")
             for bin_name, count in entropy_distribution.items():
                 percentage = count / len(prob_metrics['max_probabilities']) * 100
-                print(f"  {bin_name}: {count:4d}개 ({percentage:5.1f}%)")
+                print(f"  {bin_name}: {count:4d} ({percentage:5.1f}%)")
         
-        # 보정 분석
+        # Calibration analysis
         calibration_metrics = prob_metrics.get('calibration_metrics', {})
         if calibration_metrics:
-            print(f"\n확률 보정 분석:")
+            print(f"\nProbability calibration analysis:")
             for class_info, metrics in calibration_metrics.items():
                 error = metrics['calibration_error']
-                print(f"{class_info}: 보정 오차 {error:.4f}")
+                print(f"{class_info}: calibration error {error:.4f}")
         
         return prob_metrics
     
     @timer
     def generate_report(self, evaluation_result, save_path=None):
-        """평가 보고서 생성"""
+        """Generate evaluation report"""
         model_name = evaluation_result['model_name']
         
         report_lines = []
-        report_lines.append(f"모델 평가 보고서: {model_name}")
+        report_lines.append(f"Model Evaluation Report: {model_name}")
         report_lines.append("=" * 60)
         
-        # 1. 기본 성능 메트릭
+        # 1. Basic performance metrics
         metrics = evaluation_result['basic_metrics']
-        report_lines.append(f"\n1. 기본 성능 메트릭")
+        report_lines.append(f"\n1. Basic Performance Metrics")
         report_lines.append("-" * 30)
         for metric_name, value in metrics.items():
             report_lines.append(f"{metric_name:20s}: {value:.4f}")
         
-        # 2. 클래스별 성능 요약
+        # 2. Class-wise performance summary
         class_metrics = evaluation_result['class_metrics']
         if class_metrics:
-            report_lines.append(f"\n2. 클래스별 성능 요약")
+            report_lines.append(f"\n2. Class-wise Performance Summary")
             report_lines.append("-" * 30)
             
             valid_classes = [cm for cm in class_metrics if cm['support'] > 0]
             if valid_classes:
                 f1_scores = [cm['f1_score'] for cm in valid_classes]
-                report_lines.append(f"평가 가능 클래스 수: {len(valid_classes)}")
-                report_lines.append(f"평균 F1 Score: {np.mean(f1_scores):.4f}")
-                report_lines.append(f"F1 Score 표준편차: {np.std(f1_scores):.4f}")
-                report_lines.append(f"최고 F1 Score: {np.max(f1_scores):.4f}")
-                report_lines.append(f"최저 F1 Score: {np.min(f1_scores):.4f}")
+                report_lines.append(f"Evaluable class count: {len(valid_classes)}")
+                report_lines.append(f"Mean F1 Score: {np.mean(f1_scores):.4f}")
+                report_lines.append(f"F1 Score std: {np.std(f1_scores):.4f}")
+                report_lines.append(f"Best F1 Score: {np.max(f1_scores):.4f}")
+                report_lines.append(f"Worst F1 Score: {np.min(f1_scores):.4f}")
         
-        # 3. 주요 혼동 패턴
+        # 3. Major confusion patterns
         confusion_metrics = evaluation_result['confusion_metrics']
         if confusion_metrics and confusion_metrics['top_confusions']:
-            report_lines.append(f"\n3. 주요 혼동 패턴")
+            report_lines.append(f"\n3. Major Confusion Patterns")
             report_lines.append("-" * 30)
             
             top_confusions = confusion_metrics['top_confusions']
             for i, confusion in enumerate(top_confusions[:8]):
                 report_lines.append(
-                    f"{i+1}. 클래스 {confusion['true_class']} → {confusion['pred_class']}: "
-                    f"{confusion['count']}회 ({confusion['rate']*100:.1f}%)"
+                    f"{i+1}. Class {confusion['true_class']} → {confusion['pred_class']}: "
+                    f"{confusion['count']} times ({confusion['rate']*100:.1f}%)"
                 )
         
-        # 4. 예측 신뢰도 분석
+        # 4. Prediction confidence analysis
         prob_metrics = evaluation_result.get('probability_metrics')
         if prob_metrics:
-            report_lines.append(f"\n4. 예측 신뢰도 분석")
+            report_lines.append(f"\n4. Prediction Confidence Analysis")
             report_lines.append("-" * 30)
             
             mean_conf = prob_metrics['mean_max_probability']
-            report_lines.append(f"평균 최대 확률: {mean_conf:.4f}")
+            report_lines.append(f"Mean max probability: {mean_conf:.4f}")
             
             confidence_analysis = prob_metrics['confidence_analysis']
-            report_lines.append(f"\n신뢰도별 분석:")
+            report_lines.append(f"\nConfidence-based analysis:")
             for threshold, analysis in confidence_analysis.items():
-                if threshold in [0.7, 0.8, 0.9]:  # 주요 임계값만
+                if threshold in [0.7, 0.8, 0.9]:  # Major thresholds only
                     count = analysis['count']
                     percentage = analysis['percentage']
                     accuracy = analysis['accuracy']
                     report_lines.append(
-                        f"임계값 {threshold}: {count}개 ({percentage:.1f}%), "
-                        f"정확도 {accuracy:.4f}"
+                        f"Threshold {threshold}: {count} ({percentage:.1f}%), "
+                        f"accuracy {accuracy:.4f}"
                     )
             
-            # 엔트로피 분석 추가
+            # Add entropy analysis
             if 'entropy_analysis' in prob_metrics:
                 entropy_stats = prob_metrics['entropy_analysis']['entropy_stats']
-                report_lines.append(f"평균 예측 엔트로피: {entropy_stats['mean_entropy']:.4f}")
+                report_lines.append(f"Mean prediction entropy: {entropy_stats['mean_entropy']:.4f}")
         
-        # 5. 클래스 불균형 분석
+        # 5. Class imbalance analysis
         imbalance_metrics = evaluation_result.get('imbalance_metrics')
         if imbalance_metrics:
-            report_lines.append(f"\n5. 클래스 불균형 분석")
+            report_lines.append(f"\n5. Class Imbalance Analysis")
             report_lines.append("-" * 30)
             
             true_ratio = imbalance_metrics['true_imbalance_ratio']
             pred_ratio = imbalance_metrics['pred_imbalance_ratio']
-            report_lines.append(f"실제 불균형 비율: {true_ratio:.2f}:1")
-            report_lines.append(f"예측 불균형 비율: {pred_ratio:.2f}:1")
+            report_lines.append(f"True imbalance ratio: {true_ratio:.2f}:1")
+            report_lines.append(f"Predicted imbalance ratio: {pred_ratio:.2f}:1")
             
             missing_pred = imbalance_metrics['missing_pred_classes']
             if missing_pred:
-                report_lines.append(f"예측되지 않은 클래스: {missing_pred}")
+                report_lines.append(f"Unpredicted classes: {missing_pred}")
             
             over_pred = imbalance_metrics['over_predicted_classes']
             under_pred = imbalance_metrics['under_predicted_classes']
             if over_pred:
-                report_lines.append(f"과대 예측된 클래스: {over_pred}")
+                report_lines.append(f"Over-predicted classes: {over_pred}")
             if under_pred:
-                report_lines.append(f"과소 예측된 클래스: {under_pred}")
+                report_lines.append(f"Under-predicted classes: {under_pred}")
         
-        # 보고서 텍스트 생성
+        # Generate report text
         report_text = "\n".join(report_lines)
         
-        # 파일 저장
+        # Save file
         if save_path:
             try:
                 with open(save_path, 'w', encoding='utf-8') as f:
                     f.write(report_text)
-                print(f"보고서 저장: {save_path}")
+                print(f"Report saved: {save_path}")
             except Exception as e:
-                print(f"보고서 저장 실패: {e}")
+                print(f"Report save failed: {e}")
         
         return report_text
     
     @timer
     def save_evaluation_results(self, output_dir=None):
-        """평가 결과 저장"""
+        """Save evaluation results"""
         if output_dir is None:
             output_dir = Config.MODEL_DIR
         
         if not self.evaluation_results:
-            print("저장할 평가 결과가 없습니다")
+            print("No evaluation results to save")
             return
         
-        # 모든 평가 결과를 CSV로 저장
+        # Save all evaluation results to CSV
         all_results = []
         
         for model_name, result in self.evaluation_results.items():
@@ -670,7 +670,7 @@ class ModelEvaluator:
             row = {'model': model_name}
             row.update(metrics)
             
-            # 추가 메트릭
+            # Additional metrics
             if result.get('probability_metrics'):
                 prob_metrics = result['probability_metrics']
                 row['mean_confidence'] = prob_metrics['mean_max_probability']
@@ -691,7 +691,7 @@ class ModelEvaluator:
             save_path = output_dir / 'evaluation_results.csv'
             save_results(results_df, save_path)
         
-        # 클래스별 성능 저장
+        # Save class-wise performance
         for model_name, result in self.evaluation_results.items():
             class_metrics = result['class_metrics']
             if class_metrics:
@@ -699,12 +699,12 @@ class ModelEvaluator:
                 save_path = output_dir / f'{model_name}_class_performance.csv'
                 save_results(class_df, save_path)
         
-        print("평가 결과 저장 완료")
+        print("Evaluation results saved successfully")
     
     def create_performance_summary(self):
-        """성능 요약 생성"""
+        """Create performance summary"""
         if not self.evaluation_results:
-            print("평가 결과가 없습니다")
+            print("No evaluation results available")
             return None
         
         summary = {
@@ -714,7 +714,7 @@ class ModelEvaluator:
             'performance_statistics': {}
         }
         
-        # 각 메트릭별 최고 모델
+        # Best model for each metric
         metrics = ['accuracy', 'macro_f1', 'weighted_f1', 'macro_precision', 'macro_recall']
         
         for metric in metrics:
@@ -734,7 +734,7 @@ class ModelEvaluator:
                     'score': best_score
                 }
         
-        # 성능 통계
+        # Performance statistics
         all_scores = {metric: [] for metric in metrics}
         
         for result in self.evaluation_results.values():
@@ -756,11 +756,11 @@ class ModelEvaluator:
         return summary
     
     def get_best_model_recommendation(self):
-        """최적 모델 추천"""
+        """Get best model recommendation"""
         if not self.evaluation_results:
             return None
         
-        # Macro F1을 기준으로 최고 모델 선정
+        # Select best model based on Macro F1
         best_score = 0
         best_model = None
         best_result = None
@@ -781,30 +781,30 @@ class ModelEvaluator:
                 'potential_concerns': []
             }
             
-            # 강점 분석
+            # Strength analysis
             if best_score >= 0.8:
-                recommendation['key_strengths'].append("높은 Macro F1 점수")
+                recommendation['key_strengths'].append("High Macro F1 score")
             
             if best_result.get('probability_metrics'):
                 mean_conf = best_result['probability_metrics']['mean_max_probability']
                 if mean_conf >= 0.8:
-                    recommendation['key_strengths'].append("높은 예측 신뢰도")
+                    recommendation['key_strengths'].append("High prediction confidence")
                 
                 if 'entropy_analysis' in best_result['probability_metrics']:
                     entropy_stats = best_result['probability_metrics']['entropy_analysis']['entropy_stats']
                     if entropy_stats['mean_entropy'] < 1.0:
-                        recommendation['key_strengths'].append("낮은 예측 불확실성")
+                        recommendation['key_strengths'].append("Low prediction uncertainty")
             
-            # 우려사항 분석
+            # Concern analysis
             if best_result.get('imbalance_metrics'):
                 missing_classes = best_result['imbalance_metrics']['missing_pred_classes']
                 if missing_classes:
-                    recommendation['potential_concerns'].append(f"예측되지 않은 클래스: {len(missing_classes)}개")
+                    recommendation['potential_concerns'].append(f"Unpredicted classes: {len(missing_classes)}")
                 
                 over_pred = best_result['imbalance_metrics']['over_predicted_classes']
                 under_pred = best_result['imbalance_metrics']['under_predicted_classes']
                 if len(over_pred) + len(under_pred) > 5:
-                    recommendation['potential_concerns'].append("다수 클래스의 불균형 예측")
+                    recommendation['potential_concerns'].append("Imbalanced prediction for many classes")
             
             class_metrics = best_result.get('class_metrics', [])
             valid_classes = [cm for cm in class_metrics if cm['support'] > 0]
@@ -812,7 +812,7 @@ class ModelEvaluator:
                 f1_scores = [cm['f1_score'] for cm in valid_classes]
                 low_performance_count = sum(1 for score in f1_scores if score < Config.CLASS_PERFORMANCE_THRESHOLD)
                 if low_performance_count > len(f1_scores) * 0.3:
-                    recommendation['potential_concerns'].append("다수 클래스의 낮은 성능")
+                    recommendation['potential_concerns'].append("Low performance for many classes")
             
             return recommendation
         

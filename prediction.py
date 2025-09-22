@@ -21,70 +21,70 @@ class PredictionProcessor:
         self.calibrated_model = None
         
     def load_trained_model(self, model_path=None):
-        """훈련된 모델 로드"""
+        """Load trained model"""
         if model_path is None:
             model_path = Config.MODEL_FILE
             
         try:
             self.model = load_model(model_path)
-            print(f"모델 로드 완료: {model_path}")
+            print(f"Model loaded successfully: {model_path}")
         except Exception as e:
-            print(f"모델 로드 실패: {e}")
+            print(f"Model loading failed: {e}")
             raise
     
     def calibrate_model(self, X_val, y_val):
-        """모델 확률 보정"""
+        """Model probability calibration"""
         if self.model is None:
-            print("모델이 로드되지 않았습니다")
+            print("Model not loaded")
             return
         
         try:
-            print("모델 확률 보정 시작")
+            print("Starting model probability calibration")
             self.calibrated_model = CalibratedClassifierCV(
                 self.model,
                 method='isotonic',
                 cv=3
             )
             self.calibrated_model.fit(X_val, y_val)
-            print("모델 확률 보정 완료")
+            print("Model probability calibration completed")
         except Exception as e:
-            print(f"모델 보정 실패: {e}")
+            print(f"Model calibration failed: {e}")
             self.calibrated_model = None
     
     @timer
     def predict(self, X_test, use_calibrated=True):
-        """모델 예측"""
+        """Model prediction"""
         if self.model is None:
-            raise ValueError("모델이 로드되지 않았습니다")
+            raise ValueError("Model not loaded")
         
-        print("모델 예측 수행 중")
+        print("Performing model prediction")
         
-        # 사용할 모델 선택
+        # Select model to use
         active_model = self.calibrated_model if (use_calibrated and self.calibrated_model is not None) else self.model
         
-        # 예측 확률
+        # Prediction probabilities
         if hasattr(active_model, 'predict_proba'):
             self.prediction_probabilities = active_model.predict_proba(X_test)
-            print(f"예측 확률 형태: {self.prediction_probabilities.shape}")
+            print(f"Prediction probability shape: {self.prediction_probabilities.shape}")
         else:
-            print("확률 예측 불가능")
+            print("Probability prediction not available")
             self.prediction_probabilities = None
         
-        # 예측 클래스
+        # Prediction classes
         self.predictions = active_model.predict(X_test)
-        print(f"예측 결과 형태: {self.predictions.shape}")
+        print(f"Prediction result shape: {self.predictions.shape}")
         
-        # 신뢰도 점수 계산
+        # Calculate confidence scores
         if self.prediction_probabilities is not None:
             self.confidence_scores = np.max(self.prediction_probabilities, axis=1)
         
-        # 예측 결과 검증
+        # Validate prediction results
         validate_predictions(self.predictions, Config.N_CLASSES)
         
         return self.predictions
     
     def _adjust_predictions_by_confidence(self, predictions, probabilities, threshold=0.6):
-        """신뢰도 기반 예측 조정"""
+        """Adjust predictions based on confidence"""
         if probabilities is None:
             return predictions
         
@@ -92,51 +92,51 @@ class PredictionProcessor:
         max_probs = np.max(probabilities, axis=1)
         low_confidence_mask = max_probs < threshold
         
-        print(f"낮은 신뢰도 예측 ({threshold} 미만): {np.sum(low_confidence_mask)}개")
+        print(f"Low confidence predictions (< {threshold}): {np.sum(low_confidence_mask)}")
         
         if np.sum(low_confidence_mask) > 0:
-            # 낮은 신뢰도 예측에 대해 상위 2개 클래스 고려
+            # Consider top 2 classes for low confidence predictions
             low_conf_indices = np.where(low_confidence_mask)[0]
             
             for idx in low_conf_indices:
                 probs = probabilities[idx]
                 sorted_indices = np.argsort(probs)[::-1]
                 
-                # 상위 2개 클래스의 확률 차이가 작으면 더 균형잡힌 클래스 선택
+                # If difference between top 2 classes is small, choose more balanced class
                 top1_prob = probs[sorted_indices[0]]
                 top2_prob = probs[sorted_indices[1]]
                 
                 if top1_prob - top2_prob < 0.1:
-                    # 현재 예측 분포를 고려하여 선택
+                    # Consider current prediction distribution
                     current_pred_counts = np.bincount(adjusted_predictions, minlength=Config.N_CLASSES)
                     expected_count = len(predictions) / Config.N_CLASSES
                     
                     top1_class = sorted_indices[0]
                     top2_class = sorted_indices[1]
                     
-                    # 예측이 적은 클래스를 선택
+                    # Choose class with fewer predictions
                     if current_pred_counts[top2_class] < current_pred_counts[top1_class]:
                         adjusted_predictions[idx] = top2_class
         
         return adjusted_predictions
     
     def _balance_prediction_distribution(self, predictions, probabilities=None, method='entropy'):
-        """예측 분포 균형 조정"""
+        """Balance prediction distribution"""
         if probabilities is None:
-            print("확률 정보가 없어 분포 조정 불가")
+            print("No probability information available for distribution adjustment")
             return predictions
         
-        print(f"예측 분포 균형 조정 시작 ({method})")
+        print(f"Starting prediction distribution balancing ({method})")
         
         current_counts = np.bincount(predictions, minlength=Config.N_CLASSES)
         total_samples = len(predictions)
         expected_count = total_samples / Config.N_CLASSES
         
-        # 목표 분포 설정
+        # Set target distribution
         target_counts = np.full(Config.N_CLASSES, int(expected_count))
         remainder = total_samples - target_counts.sum()
         
-        # 나머지를 무작위로 분배
+        # Distribute remainder randomly
         if remainder > 0:
             random_classes = np.random.RandomState(Config.RANDOM_STATE).choice(
                 Config.N_CLASSES, remainder, replace=False
@@ -147,7 +147,7 @@ class PredictionProcessor:
         balanced_predictions = predictions.copy()
         
         if method == 'entropy':
-            # 엔트로피 기반 조정
+            # Entropy-based adjustment
             entropies = []
             for i in range(len(probabilities)):
                 probs = probabilities[i]
@@ -156,26 +156,26 @@ class PredictionProcessor:
             
             entropies = np.array(entropies)
             
-            # 각 클래스별로 조정
+            # Adjust for each class
             for class_id in range(Config.N_CLASSES):
                 current_count = current_counts[class_id]
                 target_count = target_counts[class_id]
                 
                 if current_count > target_count:
-                    # 과다 예측된 클래스에서 제거
+                    # Remove from over-predicted class
                     remove_count = current_count - target_count
                     class_indices = np.where(balanced_predictions == class_id)[0]
                     
-                    # 높은 엔트로피(불확실한) 예측 우선 제거
+                    # Prioritize removal of high entropy (uncertain) predictions
                     class_entropies = entropies[class_indices]
                     remove_indices = class_indices[np.argsort(class_entropies)[-remove_count:]]
                     
-                    # 다른 클래스로 재할당
+                    # Reassign to other classes
                     for idx in remove_indices:
                         probs = probabilities[idx].copy()
-                        probs[class_id] = 0  # 현재 클래스 제외
+                        probs[class_id] = 0  # Exclude current class
                         
-                        # 부족한 클래스들에 우선순위
+                        # Prioritize under-represented classes
                         for j in range(Config.N_CLASSES):
                             if current_counts[j] < target_counts[j]:
                                 probs[j] *= 2
@@ -188,14 +188,14 @@ class PredictionProcessor:
         return balanced_predictions
     
     def _ensemble_predictions(self, predictions_list, probabilities_list=None, method='voting'):
-        """앙상블 예측 결합"""
+        """Combine ensemble predictions"""
         if len(predictions_list) == 1:
             return predictions_list[0]
         
-        print(f"앙상블 예측 결합 ({method})")
+        print(f"Combining ensemble predictions ({method})")
         
         if method == 'voting':
-            # 다수결 투표
+            # Majority voting
             predictions_array = np.array(predictions_list)
             ensemble_pred = []
             
@@ -207,12 +207,12 @@ class PredictionProcessor:
             return np.array(ensemble_pred)
         
         elif method == 'probability' and probabilities_list is not None:
-            # 확률 평균
+            # Average probabilities
             avg_probabilities = np.mean(probabilities_list, axis=0)
             return np.argmax(avg_probabilities, axis=1)
         
         elif method == 'weighted' and probabilities_list is not None:
-            # 가중 평균 (신뢰도 기반)
+            # Weighted average (confidence-based)
             weights = []
             for probs in probabilities_list:
                 confidence = np.mean(np.max(probs, axis=1))
@@ -228,131 +228,131 @@ class PredictionProcessor:
             return np.argmax(weighted_probabilities, axis=1)
         
         else:
-            # 기본적으로 첫 번째 예측 반환
+            # Return first prediction by default
             return predictions_list[0]
     
     @timer
     def create_submission_file(self, test_ids, output_path=None, predictions=None, 
                              apply_balancing=True, confidence_threshold=0.6):
-        """제출 파일 생성"""
+        """Create submission file"""
         if predictions is None:
             predictions = self.predictions
         
         if predictions is None:
-            raise ValueError("예측이 수행되지 않았습니다")
+            raise ValueError("No predictions available")
         
         if output_path is None:
             output_path = Config.RESULT_FILE
         
-        print("제출 파일 생성 중")
+        print("Creating submission file")
         
-        # 신뢰도 기반 조정
+        # Confidence-based adjustment
         if self.prediction_probabilities is not None:
             predictions = self._adjust_predictions_by_confidence(
                 predictions, self.prediction_probabilities, confidence_threshold
             )
         
-        # 분포 균형 조정
+        # Distribution balancing
         if apply_balancing and self.prediction_probabilities is not None:
             predictions = self._balance_prediction_distribution(
                 predictions, self.prediction_probabilities
             )
         
-        # 기본 검증
+        # Basic validation
         if len(test_ids) != len(predictions):
-            raise ValueError(f"ID 개수({len(test_ids)})와 예측 개수({len(predictions)})가 일치하지 않습니다")
+            raise ValueError(f"ID count ({len(test_ids)}) and prediction count ({len(predictions)}) do not match")
         
         submission_df = create_submission_template(
             test_ids, predictions,
             Config.ID_COLUMN, Config.TARGET_COLUMN
         )
         
-        # 데이터 검증
-        print(f"제출 파일 형태: {submission_df.shape}")
-        print(f"ID 개수: {len(submission_df[Config.ID_COLUMN].unique())}")
-        print(f"예측값 범위: {submission_df[Config.TARGET_COLUMN].min()} ~ {submission_df[Config.TARGET_COLUMN].max()}")
+        # Data validation
+        print(f"Submission file shape: {submission_df.shape}")
+        print(f"ID count: {len(submission_df[Config.ID_COLUMN].unique())}")
+        print(f"Prediction range: {submission_df[Config.TARGET_COLUMN].min()} ~ {submission_df[Config.TARGET_COLUMN].max()}")
         
-        # 중복 ID 확인
+        # Check duplicate IDs
         if submission_df[Config.ID_COLUMN].duplicated().any():
-            print("경고: 중복된 ID가 발견되었습니다")
+            print("Warning: Duplicate IDs found")
         
-        # 예측값 범위 확인
+        # Check prediction range
         invalid_predictions = (submission_df[Config.TARGET_COLUMN] < 0) | (submission_df[Config.TARGET_COLUMN] >= Config.N_CLASSES)
         if invalid_predictions.any():
-            print("경고: 예측값이 유효한 범위를 벗어났습니다")
+            print("Warning: Predictions outside valid range")
             invalid_count = invalid_predictions.sum()
-            print(f"유효하지 않은 예측값 개수: {invalid_count}")
+            print(f"Invalid prediction count: {invalid_count}")
             
-            # 가장 빈번한 클래스로 수정
+            # Fix with most frequent class
             most_frequent_class = submission_df[Config.TARGET_COLUMN].mode()[0]
             submission_df.loc[invalid_predictions, Config.TARGET_COLUMN] = most_frequent_class
-            print(f"유효하지 않은 예측값을 {most_frequent_class}으로 수정")
+            print(f"Fixed invalid predictions to {most_frequent_class}")
         
-        # 파일 저장
+        # Save file
         try:
             submission_df.to_csv(output_path, index=False)
-            print(f"제출 파일 저장 완료: {output_path}")
+            print(f"Submission file saved successfully: {output_path}")
         except Exception as e:
-            print(f"파일 저장 실패: {e}")
+            print(f"File save failed: {e}")
             raise
         
-        # 저장된 파일 검증
+        # Verify saved file
         try:
             saved_df = pd.read_csv(output_path)
             if saved_df.shape == submission_df.shape:
-                print("파일 저장 검증 완료")
+                print("File save verification completed")
             else:
-                print(f"경고: 저장된 파일 크기가 다릅니다")
+                print(f"Warning: Saved file size differs")
         except Exception as e:
-            print(f"파일 검증 실패: {e}")
+            print(f"File verification failed: {e}")
         
-        # 예측 분포 분석
+        # Analyze prediction distribution
         self.analyze_prediction_distribution(predictions)
         
         return submission_df
     
     def analyze_prediction_distribution(self, predictions=None):
-        """예측 분포 분석"""
+        """Analyze prediction distribution"""
         if predictions is None:
             predictions = self.predictions
         
         if predictions is None:
-            print("예측이 수행되지 않았습니다")
+            print("No predictions available")
             return None
         
-        print("예측 분포 분석")
+        print("Prediction distribution analysis")
         
         unique, counts = np.unique(predictions, return_counts=True)
         total_predictions = len(predictions)
         
-        print("클래스별 예측 개수:")
+        print("Class-wise prediction counts:")
         for class_id in range(min(10, Config.N_CLASSES)):
             count = counts[unique == class_id][0] if class_id in unique else 0
             percentage = (count / total_predictions) * 100
-            print(f"클래스 {class_id:2d}: {count:4d}개 ({percentage:5.2f}%)")
+            print(f"Class {class_id:2d}: {count:4d} ({percentage:5.2f}%)")
         
         if Config.N_CLASSES > 10:
-            print(f"... (총 {Config.N_CLASSES}개 클래스)")
+            print(f"... (total {Config.N_CLASSES} classes)")
         
-        # 분포 통계
+        # Distribution statistics
         expected_per_class = total_predictions / Config.N_CLASSES
         actual_counts = [counts[unique == i][0] if i in unique else 0 for i in range(Config.N_CLASSES)]
         
-        print(f"\n총 예측 개수: {total_predictions}")
-        print(f"클래스당 기대 개수: {expected_per_class:.1f}")
-        print(f"실제 분포 표준편차: {np.std(actual_counts):.2f}")
+        print(f"\nTotal predictions: {total_predictions}")
+        print(f"Expected per class: {expected_per_class:.1f}")
+        print(f"Actual distribution std: {np.std(actual_counts):.2f}")
         
-        # 불균형 정도 계산
+        # Calculate imbalance degree
         max_count = max(actual_counts)
         min_count = min([c for c in actual_counts if c > 0]) if any(actual_counts) else 1
         imbalance_ratio = max_count / min_count
         
-        print(f"불균형 비율: {imbalance_ratio:.2f}:1")
+        print(f"Imbalance ratio: {imbalance_ratio:.2f}:1")
         
-        # 누락된 클래스
+        # Missing classes
         missing_classes = [i for i in range(Config.N_CLASSES) if i not in unique]
         if missing_classes:
-            print(f"누락된 클래스: {missing_classes}")
+            print(f"Missing classes: {missing_classes}")
         
         return {
             'distribution': dict(zip(unique, counts)),
@@ -364,40 +364,40 @@ class PredictionProcessor:
         }
     
     def validate_predictions(self, y_true=None):
-        """예측 결과 검증"""
+        """Validate prediction results"""
         if self.predictions is None:
-            print("예측이 수행되지 않았습니다")
+            print("No predictions available")
             return None
         
-        print("예측 결과 검증")
+        print("Prediction result validation")
         
-        print(f"예측 개수: {len(self.predictions)}")
-        print(f"고유 클래스 개수: {len(np.unique(self.predictions))}")
-        print(f"예측값 범위: {self.predictions.min()} ~ {self.predictions.max()}")
+        print(f"Prediction count: {len(self.predictions)}")
+        print(f"Unique class count: {len(np.unique(self.predictions))}")
+        print(f"Prediction range: {self.predictions.min()} ~ {self.predictions.max()}")
         
-        # 신뢰도 분석
+        # Confidence analysis
         if self.confidence_scores is not None:
-            print(f"평균 신뢰도: {np.mean(self.confidence_scores):.4f}")
-            print(f"신뢰도 표준편차: {np.std(self.confidence_scores):.4f}")
+            print(f"Average confidence: {np.mean(self.confidence_scores):.4f}")
+            print(f"Confidence std: {np.std(self.confidence_scores):.4f}")
             
             high_conf = np.sum(self.confidence_scores > 0.8)
             medium_conf = np.sum((self.confidence_scores > 0.5) & (self.confidence_scores <= 0.8))
             low_conf = np.sum(self.confidence_scores <= 0.5)
             
-            print(f"높은 신뢰도 (>0.8): {high_conf}개 ({high_conf/len(self.predictions)*100:.1f}%)")
-            print(f"중간 신뢰도 (0.5-0.8): {medium_conf}개 ({medium_conf/len(self.predictions)*100:.1f}%)")
-            print(f"낮은 신뢰도 (≤0.5): {low_conf}개 ({low_conf/len(self.predictions)*100:.1f}%)")
+            print(f"High confidence (>0.8): {high_conf} ({high_conf/len(self.predictions)*100:.1f}%)")
+            print(f"Medium confidence (0.5-0.8): {medium_conf} ({medium_conf/len(self.predictions)*100:.1f}%)")
+            print(f"Low confidence (≤0.5): {low_conf} ({low_conf/len(self.predictions)*100:.1f}%)")
         
-        # 실제 레이블이 제공된 경우 성능 계산
+        # Calculate performance if true labels provided
         if y_true is not None:
             if len(y_true) != len(self.predictions):
-                print("경고: 실제 레이블과 예측값의 개수가 다릅니다")
+                print("Warning: True label and prediction counts differ")
                 return None
             
             macro_f1 = calculate_macro_f1(y_true, self.predictions)
             print(f"Macro F1 Score: {macro_f1:.4f}")
             
-            # 클래스별 성능 분석
+            # Class-wise performance analysis
             try:
                 report = classification_report(y_true, self.predictions, output_dict=True, zero_division=0)
                 
@@ -414,18 +414,18 @@ class PredictionProcessor:
                         })
                         
                         if class_id < 10:
-                            print(f"클래스 {class_id:2d} - F1: {report[class_key]['f1-score']:.4f}, 지원: {report[class_key]['support']:4d}")
+                            print(f"Class {class_id:2d} - F1: {report[class_key]['f1-score']:.4f}, Support: {report[class_key]['support']:4d}")
                 
-                # 성능이 낮은 클래스 식별
+                # Identify low-performance classes
                 low_performance_classes = [
                     m for m in class_metrics 
                     if m['f1_score'] < Config.CLASS_PERFORMANCE_THRESHOLD and m['support'] > 0
                 ]
                 
                 if low_performance_classes:
-                    print(f"\n성능이 낮은 클래스 ({len(low_performance_classes)}개):")
+                    print(f"\nLow-performance classes ({len(low_performance_classes)}):")
                     for m in low_performance_classes[:5]:
-                        print(f"  클래스 {m['class']:2d}: F1={m['f1_score']:.3f}, 지원={m['support']:4d}")
+                        print(f"  Class {m['class']:2d}: F1={m['f1_score']:.3f}, Support={m['support']:4d}")
                 
                 return {
                     'macro_f1': macro_f1,
@@ -435,15 +435,15 @@ class PredictionProcessor:
                 }
                 
             except Exception as e:
-                print(f"성능 분석 실패: {e}")
+                print(f"Performance analysis failed: {e}")
                 return {'macro_f1': macro_f1}
         
         return None
     
     def get_prediction_confidence(self):
-        """예측 신뢰도 분석"""
+        """Analyze prediction confidence"""
         if self.prediction_probabilities is None:
-            print("예측 확률이 없어 신뢰도 분석 불가")
+            print("No prediction probabilities available for confidence analysis")
             return None
         
         max_probs = np.max(self.prediction_probabilities, axis=1)
@@ -456,7 +456,7 @@ class PredictionProcessor:
             'max_confidence': np.max(max_probs)
         }
         
-        # 신뢰도 구간별 분포
+        # Confidence interval distribution
         confidence_bins = [0.0, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95, 1.0]
         bin_counts = np.histogram(max_probs, bins=confidence_bins)[0]
         
@@ -465,15 +465,15 @@ class PredictionProcessor:
             bin_name = f"{confidence_bins[i]:.1f}-{confidence_bins[i+1]:.1f}"
             confidence_distribution[bin_name] = bin_counts[i]
         
-        print("예측 신뢰도 분석:")
-        print(f"  평균 신뢰도: {confidence_stats['mean_confidence']:.4f}")
-        print(f"  중앙값 신뢰도: {confidence_stats['median_confidence']:.4f}")
-        print(f"  신뢰도 표준편차: {confidence_stats['std_confidence']:.4f}")
+        print("Prediction confidence analysis:")
+        print(f"  Average confidence: {confidence_stats['mean_confidence']:.4f}")
+        print(f"  Median confidence: {confidence_stats['median_confidence']:.4f}")
+        print(f"  Confidence std: {confidence_stats['std_confidence']:.4f}")
         
-        print("\n신뢰도 구간별 분포:")
+        print("\nConfidence interval distribution:")
         for bin_name, count in confidence_distribution.items():
             percentage = (count / len(max_probs)) * 100
-            print(f"  {bin_name}: {count:4d}개 ({percentage:5.1f}%)")
+            print(f"  {bin_name}: {count:4d} ({percentage:5.1f}%)")
         
         return {
             'confidence_stats': confidence_stats,

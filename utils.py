@@ -20,13 +20,13 @@ from scipy.stats import zscore
 warnings.filterwarnings('ignore')
 
 def setup_logging(log_file=None, level='INFO'):
-    """로깅 설정"""
+    """Setup logging configuration"""
     if log_file is None:
         log_file = Path('logs') / 'training.log'
     
     log_file.parent.mkdir(parents=True, exist_ok=True)
     
-    # 기존 핸들러 제거
+    # Remove existing handlers
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     
@@ -42,13 +42,13 @@ def setup_logging(log_file=None, level='INFO'):
     return logging.getLogger(__name__)
 
 def load_data(file_path, chunk_size=None):
-    """메모리 효율적 데이터 로드"""
+    """Memory-efficient data loading"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
         
         if not file_path.exists():
-            raise FileNotFoundError(f"파일을 찾을 수 없습니다: {file_path}")
+            raise FileNotFoundError(f"File not found: {file_path}")
         
         file_size_mb = file_path.stat().st_size / (1024 * 1024)
         
@@ -64,74 +64,74 @@ def load_data(file_path, chunk_size=None):
         
         return data
     except Exception as e:
-        raise Exception(f"데이터 로드 실패: {e}")
+        raise Exception(f"Data loading failed: {e}")
 
 def save_model(model, file_path):
-    """모델 저장"""
+    """Save model"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
         
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # joblib 우선 시도
+        # Try joblib first
         try:
             joblib.dump(model, file_path, compress=3)
             file_size_mb = file_path.stat().st_size / (1024 * 1024)
-            print(f"모델 저장 완료 (joblib): {file_path} ({file_size_mb:.1f}MB)")
+            print(f"Model saved successfully (joblib): {file_path} ({file_size_mb:.1f}MB)")
             return
         except Exception as joblib_error:
-            print(f"joblib 저장 실패: {joblib_error}")
+            print(f"joblib save failed: {joblib_error}")
         
-        # pickle 시도
+        # Try pickle
         try:
             with open(file_path, 'wb') as f:
                 pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
             
             file_size_mb = file_path.stat().st_size / (1024 * 1024)
-            print(f"모델 저장 완료 (pickle): {file_path} ({file_size_mb:.1f}MB)")
+            print(f"Model saved successfully (pickle): {file_path} ({file_size_mb:.1f}MB)")
             
         except Exception as pickle_error:
-            print(f"pickle 저장 실패: {pickle_error}")
-            raise Exception(f"모델 저장 실패: joblib={joblib_error}, pickle={pickle_error}")
+            print(f"pickle save failed: {pickle_error}")
+            raise Exception(f"Model save failed: joblib={joblib_error}, pickle={pickle_error}")
         
     except Exception as e:
-        print(f"모델 저장 실패: {e}")
+        print(f"Model save failed: {e}")
         raise
 
 def load_model(file_path):
-    """모델 로드"""
+    """Load model"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
         
         if not file_path.exists():
-            raise FileNotFoundError(f"모델 파일을 찾을 수 없습니다: {file_path}")
+            raise FileNotFoundError(f"Model file not found: {file_path}")
         
-        # joblib 우선 시도
+        # Try joblib first
         try:
             model = joblib.load(file_path)
-            print(f"모델 로드 완료 (joblib): {file_path}")
+            print(f"Model loaded successfully (joblib): {file_path}")
             return model
         except:
             pass
         
-        # pickle 시도
+        # Try pickle
         try:
             with open(file_path, 'rb') as f:
                 model = pickle.load(f)
-            print(f"모델 로드 완료 (pickle): {file_path}")
+            print(f"Model loaded successfully (pickle): {file_path}")
             return model
         except:
             pass
         
-        raise Exception("모든 로드 방법 실패")
+        raise Exception("All loading methods failed")
         
     except Exception as e:
-        raise Exception(f"모델 로드 실패: {e}")
+        raise Exception(f"Model loading failed: {e}")
 
 def save_joblib(obj, file_path, compress=3):
-    """joblib을 사용한 객체 저장"""
+    """Save object using joblib"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
@@ -141,38 +141,38 @@ def save_joblib(obj, file_path, compress=3):
         
         if file_path.exists():
             file_size_mb = file_path.stat().st_size / (1024 * 1024)
-            print(f"객체 저장 완료: {file_path} ({file_size_mb:.1f}MB)")
+            print(f"Object saved successfully: {file_path} ({file_size_mb:.1f}MB)")
         else:
-            print(f"객체 저장 완료: {file_path}")
+            print(f"Object saved successfully: {file_path}")
             
     except Exception as e:
-        raise Exception(f"객체 저장 실패: {e}")
+        raise Exception(f"Object save failed: {e}")
 
 def load_joblib(file_path):
-    """joblib을 사용한 객체 로드"""
+    """Load object using joblib"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
         
         if not file_path.exists():
-            raise FileNotFoundError(f"파일을 찾을 수 없습니다: {file_path}")
+            raise FileNotFoundError(f"File not found: {file_path}")
         
         obj = joblib.load(file_path)
-        print(f"객체 로드 완료: {file_path}")
+        print(f"Object loaded successfully: {file_path}")
         return obj
     except Exception as e:
-        raise Exception(f"객체 로드 실패: {e}")
+        raise Exception(f"Object loading failed: {e}")
 
 def calculate_macro_f1(y_true, y_pred):
-    """Macro F1 스코어 계산"""
+    """Calculate Macro F1 score"""
     return f1_score(y_true, y_pred, average='macro', zero_division=0)
 
 def calculate_weighted_f1(y_true, y_pred):
-    """Weighted F1 스코어 계산"""
+    """Calculate Weighted F1 score"""
     return f1_score(y_true, y_pred, average='weighted', zero_division=0)
 
 def calculate_all_metrics(y_true, y_pred):
-    """모든 평가 메트릭 계산"""
+    """Calculate all evaluation metrics"""
     from sklearn.metrics import precision_score, recall_score
     
     try:
@@ -187,7 +187,7 @@ def calculate_all_metrics(y_true, y_pred):
             'weighted_recall': recall_score(y_true, y_pred, average='weighted', zero_division=0)
         }
     except Exception as e:
-        print(f"메트릭 계산 중 오류: {e}")
+        print(f"Error calculating metrics: {e}")
         metrics = {
             'accuracy': 0.0,
             'macro_f1': 0.0,
@@ -202,7 +202,7 @@ def calculate_all_metrics(y_true, y_pred):
     return metrics
 
 def calculate_class_metrics(y_true, y_pred, labels=None):
-    """클래스별 메트릭 계산"""
+    """Calculate class-wise metrics"""
     try:
         if labels is None:
             labels = sorted(list(set(y_true) | set(y_pred)))
@@ -223,15 +223,15 @@ def calculate_class_metrics(y_true, y_pred, labels=None):
         
         return class_metrics
     except Exception as e:
-        print(f"클래스 메트릭 계산 중 오류: {e}")
+        print(f"Error calculating class metrics: {e}")
         return []
 
 def print_classification_metrics(y_true, y_pred, class_names=None, target_names=None):
-    """분류 성능 메트릭 출력"""
+    """Print classification performance metrics"""
     try:
         metrics = calculate_all_metrics(y_true, y_pred)
         
-        print("분류 성능 메트릭")
+        print("Classification Performance Metrics")
         for metric_name, value in metrics.items():
             print(f"{metric_name:20s}: {value:.4f}")
         
@@ -248,23 +248,23 @@ def print_classification_metrics(y_true, y_pred, class_names=None, target_names=
                 zero_division=0,
                 digits=4
             )
-            print("\n분류 리포트:")
+            print("\nClassification Report:")
             print(report)
         except Exception as e:
-            print(f"분류 리포트 생성 실패: {e}")
+            print(f"Classification report generation failed: {e}")
         
         return metrics['macro_f1']
     except Exception as e:
-        print(f"성능 메트릭 출력 중 오류: {e}")
+        print(f"Error printing performance metrics: {e}")
         return 0.0
 
 def create_cv_folds(X, y, n_splits=5, random_state=42):
-    """교차 검증 폴드 생성"""
+    """Create cross-validation folds"""
     try:
         skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
         return list(skf.split(X, y))
     except Exception as e:
-        print(f"CV 폴드 생성 실패: {e}")
+        print(f"CV fold creation failed: {e}")
         from sklearn.model_selection import train_test_split
         indices = np.arange(len(X))
         folds = []
@@ -276,7 +276,7 @@ def create_cv_folds(X, y, n_splits=5, random_state=42):
         return folds
 
 def calculate_class_weights(y, method='balanced'):
-    """클래스 가중치 계산"""
+    """Calculate class weights"""
     try:
         if method == 'balanced':
             unique_classes = np.unique(y)
@@ -292,11 +292,11 @@ def calculate_class_weights(y, method='balanced'):
         else:
             return None
     except Exception as e:
-        print(f"클래스 가중치 계산 실패: {e}")
+        print(f"Class weight calculation failed: {e}")
         return None
 
 def timer(func):
-    """함수 실행 시간 측정 데코레이터"""
+    """Function execution time measurement decorator"""
     def wrapper(*args, **kwargs):
         start_time = time.time()
         memory_before = memory_usage_check()
@@ -310,41 +310,41 @@ def timer(func):
             memory_increase = memory_after - memory_before
             
             if elapsed < 60:
-                print(f"{func.__name__} 실행 시간: {elapsed:.2f}초")
+                print(f"{func.__name__} execution time: {elapsed:.2f} seconds")
             else:
                 minutes = int(elapsed // 60)
                 seconds = elapsed % 60
-                print(f"{func.__name__} 실행 시간: {minutes}분 {seconds:.2f}초")
+                print(f"{func.__name__} execution time: {minutes}m {seconds:.2f}s")
             
-            if memory_increase > 50:  # 50MB 이상 증가시 출력
-                print(f"메모리 증가: {memory_increase:.1f}MB")
+            if memory_increase > 50:  # Display if increase > 50MB
+                print(f"Memory increase: {memory_increase:.1f}MB")
             
             return result
             
         except Exception as e:
-            print(f"{func.__name__} 실행 중 오류 발생: {e}")
+            print(f"Error during {func.__name__} execution: {e}")
             raise
             
     return wrapper
 
 def check_data_quality(df, feature_columns):
-    """데이터 품질 검사"""
+    """Data quality check"""
     try:
-        print("데이터 품질 검사")
-        print(f"데이터 형태: {df.shape}")
+        print("Data quality check")
+        print(f"Data shape: {df.shape}")
         
-        # 결측치 확인
+        # Check missing values
         missing_info = df[feature_columns].isnull().sum()
         total_missing = missing_info.sum()
-        print(f"총 결측치 개수: {total_missing}")
+        print(f"Total missing values: {total_missing}")
         
         if total_missing > 0:
-            print("결측치가 있는 컬럼 (상위 5개):")
+            print("Columns with missing values (top 5):")
             missing_cols = missing_info[missing_info > 0].sort_values(ascending=False)
             for col in missing_cols.head(5).index:
-                print(f"  {col}: {missing_info[col]}개 ({missing_info[col]/len(df)*100:.2f}%)")
+                print(f"  {col}: {missing_info[col]} ({missing_info[col]/len(df)*100:.2f}%)")
         
-        # 무한값 확인
+        # Check infinite values
         numeric_cols = df[feature_columns].select_dtypes(include=[np.number]).columns
         inf_counts = {}
         total_inf = 0
@@ -355,41 +355,41 @@ def check_data_quality(df, feature_columns):
                 inf_counts[col] = inf_count
                 total_inf += inf_count
         
-        print(f"무한값 개수: {total_inf}")
+        print(f"Infinite values: {total_inf}")
         
         if total_inf > 0:
-            print("무한값이 있는 컬럼 (상위 5개):")
+            print("Columns with infinite values (top 5):")
             sorted_inf = sorted(inf_counts.items(), key=lambda x: x[1], reverse=True)
             for col, count in sorted_inf[:5]:
-                print(f"  {col}: {count}개 ({count/len(df)*100:.2f}%)")
+                print(f"  {col}: {count} ({count/len(df)*100:.2f}%)")
         
-        # 데이터 타입 확인
-        print(f"\n데이터 타입:")
+        # Check data types
+        print(f"\nData types:")
         dtype_counts = df[feature_columns].dtypes.value_counts()
         for dtype, count in dtype_counts.items():
-            print(f"  {dtype}: {count}개 컬럼")
+            print(f"  {dtype}: {count} columns")
         
-        # 기본 통계
+        # Basic statistics
         if len(numeric_cols) > 0:
-            print(f"\n기본 통계 (수치형 컬럼 {len(numeric_cols)}개):")
+            print(f"\nBasic statistics ({len(numeric_cols)} numeric columns):")
             stats = df[numeric_cols].describe()
-            print(f"  평균의 범위: {stats.loc['mean'].min():.4f} ~ {stats.loc['mean'].max():.4f}")
-            print(f"  표준편차의 범위: {stats.loc['std'].min():.4f} ~ {stats.loc['std'].max():.4f}")
-            print(f"  최솟값: {stats.loc['min'].min():.4f}")
-            print(f"  최댓값: {stats.loc['max'].max():.4f}")
+            print(f"  Mean range: {stats.loc['mean'].min():.4f} ~ {stats.loc['mean'].max():.4f}")
+            print(f"  Std range: {stats.loc['std'].min():.4f} ~ {stats.loc['std'].max():.4f}")
+            print(f"  Min value: {stats.loc['min'].min():.4f}")
+            print(f"  Max value: {stats.loc['max'].max():.4f}")
         
-        # 메모리 사용량
+        # Memory usage
         memory_mb = df.memory_usage(deep=True).sum() / 1024 / 1024
-        print(f"메모리 사용량: {memory_mb:.2f} MB")
+        print(f"Memory usage: {memory_mb:.2f} MB")
         
         return total_missing == 0 and total_inf == 0
         
     except Exception as e:
-        print(f"데이터 품질 검사 중 오류: {e}")
+        print(f"Error during data quality check: {e}")
         return False
 
 def memory_usage_check():
-    """메모리 사용량 확인"""
+    """Check memory usage"""
     try:
         process = psutil.Process()
         memory_mb = process.memory_info().rss / 1024 / 1024
@@ -398,7 +398,7 @@ def memory_usage_check():
         return 0
 
 def save_results(results, file_path):
-    """결과를 CSV 파일로 저장"""
+    """Save results to CSV file"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
@@ -413,42 +413,42 @@ def save_results(results, file_path):
             df = results
         
         df.to_csv(file_path, index=False, encoding='utf-8')
-        print(f"결과 저장 완료: {file_path}")
+        print(f"Results saved successfully: {file_path}")
     except Exception as e:
-        print(f"결과 저장 실패: {e}")
+        print(f"Results save failed: {e}")
 
 def validate_predictions(y_pred, n_classes, sample_ids=None):
-    """예측 결과 검증"""
+    """Validate prediction results"""
     try:
-        print("예측 결과 검증")
+        print("Prediction validation")
         
         if sample_ids is not None:
-            print(f"샘플 개수: {len(sample_ids)}")
-            print(f"예측 개수: {len(y_pred)}")
+            print(f"Sample count: {len(sample_ids)}")
+            print(f"Prediction count: {len(y_pred)}")
             
             if len(sample_ids) != len(y_pred):
-                print("경고: 샘플 개수와 예측 개수가 일치하지 않습니다")
+                print("Warning: Sample count and prediction count do not match")
         
-        # 예측값 범위 확인
+        # Check prediction value range
         min_pred = np.min(y_pred)
         max_pred = np.max(y_pred)
         unique_pred = len(np.unique(y_pred))
         
-        print(f"예측값 범위: {min_pred} ~ {max_pred}")
-        print(f"고유 예측값 개수: {unique_pred}")
-        print(f"총 클래스 개수: {n_classes}")
+        print(f"Prediction range: {min_pred} ~ {max_pred}")
+        print(f"Unique prediction count: {unique_pred}")
+        print(f"Total class count: {n_classes}")
         
-        # 유효성 검사
+        # Validity check
         is_valid = True
         if min_pred < 0 or max_pred >= n_classes:
-            print(f"경고: 예측값이 유효한 범위(0 ~ {n_classes-1})를 벗어났습니다")
+            print(f"Warning: Predictions outside valid range (0 ~ {n_classes-1})")
             is_valid = False
         
-        # 분포 확인
+        # Distribution check
         unique, counts = np.unique(y_pred, return_counts=True)
-        print(f"\n예측 분포 (상위 15개):")
+        print(f"\nPrediction distribution (top 15):")
         
-        # 빈도순으로 정렬
+        # Sort by frequency
         sorted_indices = np.argsort(counts)[::-1]
         display_count = min(15, len(unique))
         
@@ -457,12 +457,12 @@ def validate_predictions(y_pred, n_classes, sample_ids=None):
             class_id = unique[idx]
             count = counts[idx]
             percentage = count / len(y_pred) * 100
-            print(f"  클래스 {class_id:2d}: {count:4d}개 ({percentage:5.2f}%)")
+            print(f"  Class {class_id:2d}: {count:4d} ({percentage:5.2f}%)")
         
         if len(unique) > 15:
-            print(f"  ... (총 {len(unique)}개 클래스)")
+            print(f"  ... (total {len(unique)} classes)")
         
-        # 누락된 클래스 확인
+        # Check missing classes
         all_classes = set(range(n_classes))
         predicted_classes = set(unique)
         missing_classes = all_classes - predicted_classes
@@ -470,46 +470,46 @@ def validate_predictions(y_pred, n_classes, sample_ids=None):
         if missing_classes:
             missing_list = sorted(list(missing_classes))
             if len(missing_list) <= 10:
-                print(f"누락된 클래스: {missing_list}")
+                print(f"Missing classes: {missing_list}")
             else:
-                print(f"누락된 클래스: {missing_list[:10]} ... (총 {len(missing_list)}개)")
+                print(f"Missing classes: {missing_list[:10]} ... (total {len(missing_list)})")
             is_valid = False
         
         return is_valid
         
     except Exception as e:
-        print(f"예측 결과 검증 중 오류: {e}")
+        print(f"Error during prediction validation: {e}")
         return False
 
 def create_submission_template(test_ids, predictions, id_col='ID', target_col='target'):
-    """제출 파일 템플릿 생성"""
+    """Create submission file template"""
     try:
         submission = pd.DataFrame({
             id_col: test_ids,
             target_col: predictions
         })
         
-        # 데이터 타입 최적화
+        # Data type optimization
         submission[target_col] = submission[target_col].astype('int16')
         
         return submission
     except Exception as e:
-        print(f"제출 파일 템플릿 생성 실패: {e}")
+        print(f"Submission file template creation failed: {e}")
         return None
 
 def analyze_class_distribution(y, class_names=None):
-    """클래스 분포 분석"""
+    """Analyze class distribution"""
     try:
-        print("클래스 분포 분석")
+        print("Class distribution analysis")
         
         unique, counts = np.unique(y, return_counts=True)
         total_samples = len(y)
         
-        print(f"총 샘플 수: {total_samples}")
-        print(f"클래스 개수: {len(unique)}")
+        print(f"Total samples: {total_samples}")
+        print(f"Class count: {len(unique)}")
         
-        # 분포 통계
-        print(f"\n클래스별 분포:")
+        # Distribution statistics
+        print(f"\nClass-wise distribution:")
         
         distribution_data = []
         for class_id, count in zip(unique, counts):
@@ -522,56 +522,56 @@ def analyze_class_distribution(y, class_names=None):
                 'percentage': percentage
             })
             
-            if class_id < 10:  # 상위 10개만 출력
-                print(f"  {class_name:>12}: {count:5d}개 ({percentage:5.2f}%)")
+            if class_id < 10:  # Display top 10 only
+                print(f"  {class_name:>12}: {count:5d} ({percentage:5.2f}%)")
         
-        # 불균형 정도 계산
+        # Calculate imbalance degree
         max_count = max(counts)
         min_count = min(counts[counts > 0]) if np.any(counts > 0) else 1
         imbalance_ratio = max_count / min_count
         
-        print(f"\n분포 통계:")
-        print(f"  최대 클래스 크기: {max_count}")
-        print(f"  최소 클래스 크기: {min_count}")
-        print(f"  불균형 비율: {imbalance_ratio:.2f}:1")
-        print(f"  표준편차: {np.std(counts):.2f}")
+        print(f"\nDistribution statistics:")
+        print(f"  Max class size: {max_count}")
+        print(f"  Min class size: {min_count}")
+        print(f"  Imbalance ratio: {imbalance_ratio:.2f}:1")
+        print(f"  Standard deviation: {np.std(counts):.2f}")
         
         return distribution_data
         
     except Exception as e:
-        print(f"클래스 분포 분석 중 오류: {e}")
+        print(f"Error during class distribution analysis: {e}")
         return []
 
 def garbage_collect():
-    """가비지 컬렉션 수행"""
+    """Perform garbage collection"""
     try:
         collected = gc.collect()
         if collected > 0:
-            print(f"메모리 정리: {collected}개 객체 해제")
+            print(f"Memory cleanup: {collected} objects released")
         return collected
     except Exception as e:
-        print(f"가비지 컬렉션 중 오류: {e}")
+        print(f"Error during garbage collection: {e}")
         return 0
 
 def format_time(seconds):
-    """초를 읽기 쉬운 형식으로 변환"""
+    """Convert seconds to readable format"""
     try:
         if seconds < 60:
-            return f"{seconds:.2f}초"
+            return f"{seconds:.2f} seconds"
         elif seconds < 3600:
             minutes = int(seconds // 60)
             remaining_seconds = seconds % 60
-            return f"{minutes}분 {remaining_seconds:.2f}초"
+            return f"{minutes}m {remaining_seconds:.2f}s"
         else:
             hours = int(seconds // 3600)
             remaining_minutes = int((seconds % 3600) // 60)
             remaining_seconds = seconds % 60
-            return f"{hours}시간 {remaining_minutes}분 {remaining_seconds:.2f}초"
+            return f"{hours}h {remaining_minutes}m {remaining_seconds:.2f}s"
     except Exception:
-        return f"{seconds}초"
+        return f"{seconds} seconds"
 
 def safe_divide(numerator, denominator, default=0.0):
-    """안전한 나눗셈"""
+    """Safe division"""
     try:
         if denominator == 0:
             return default
@@ -580,27 +580,27 @@ def safe_divide(numerator, denominator, default=0.0):
         return default
 
 def check_system_resources():
-    """시스템 리소스 확인"""
+    """Check system resources"""
     try:
-        # CPU 정보
+        # CPU information
         cpu_count = os.cpu_count()
         cpu_usage = psutil.cpu_percent(interval=1)
         
-        # 메모리 정보
+        # Memory information
         memory = psutil.virtual_memory()
         memory_total_gb = memory.total / (1024**3)
         memory_available_gb = memory.available / (1024**3)
         memory_usage_percent = memory.percent
         
-        # 디스크 정보
+        # Disk information
         disk = psutil.disk_usage('.')
         disk_total_gb = disk.total / (1024**3)
         disk_free_gb = disk.free / (1024**3)
         
-        print(f"시스템 리소스 상태:")
-        print(f"  CPU: {cpu_count}코어, 사용률 {cpu_usage}%")
-        print(f"  메모리: {memory_available_gb:.1f}GB 사용가능 / {memory_total_gb:.1f}GB 전체 ({memory_usage_percent:.1f}% 사용중)")
-        print(f"  디스크: {disk_free_gb:.1f}GB 여유공간 / {disk_total_gb:.1f}GB 전체")
+        print(f"System resource status:")
+        print(f"  CPU: {cpu_count} cores, usage {cpu_usage}%")
+        print(f"  Memory: {memory_available_gb:.1f}GB available / {memory_total_gb:.1f}GB total ({memory_usage_percent:.1f}% used)")
+        print(f"  Disk: {disk_free_gb:.1f}GB free / {disk_total_gb:.1f}GB total")
         
         return {
             'cpu_count': cpu_count,
@@ -613,11 +613,11 @@ def check_system_resources():
         }
         
     except Exception as e:
-        print(f"시스템 리소스 확인 실패: {e}")
+        print(f"System resource check failed: {e}")
         return None
 
 def optimize_dataframe_memory(df):
-    """DataFrame 메모리 사용량 최적화"""
+    """Optimize DataFrame memory usage"""
     try:
         initial_memory = df.memory_usage(deep=True).sum() / 1024 / 1024
         
@@ -646,20 +646,20 @@ def optimize_dataframe_memory(df):
         final_memory = df.memory_usage(deep=True).sum() / 1024 / 1024
         memory_reduction = (initial_memory - final_memory) / initial_memory * 100
         
-        print(f"메모리 사용량 최적화: {initial_memory:.1f}MB -> {final_memory:.1f}MB ({memory_reduction:.1f}% 감소)")
+        print(f"Memory usage optimization: {initial_memory:.1f}MB -> {final_memory:.1f}MB ({memory_reduction:.1f}% reduction)")
         
         return df
         
     except Exception as e:
-        print(f"메모리 최적화 실패: {e}")
+        print(f"Memory optimization failed: {e}")
         return df
 
 def validate_data_consistency(train_df, test_df, feature_columns):
-    """훈련 데이터와 테스트 데이터 일관성 검증"""
+    """Validate training and test data consistency"""
     try:
-        print("데이터 일관성 검증")
+        print("Data consistency validation")
         
-        # 피처 컬럼 확인
+        # Check feature columns
         train_features = set(train_df.columns) & set(feature_columns)
         test_features = set(test_df.columns) & set(feature_columns)
         
@@ -667,12 +667,12 @@ def validate_data_consistency(train_df, test_df, feature_columns):
         missing_in_train = test_features - train_features
         
         if missing_in_test:
-            print(f"테스트 데이터에서 누락된 피처: {missing_in_test}")
+            print(f"Features missing in test data: {missing_in_test}")
         
         if missing_in_train:
-            print(f"훈련 데이터에서 누락된 피처: {missing_in_train}")
+            print(f"Features missing in train data: {missing_in_train}")
         
-        # 데이터 타입 일관성 확인
+        # Check data type consistency
         common_features = train_features & test_features
         type_mismatches = []
         
@@ -685,14 +685,14 @@ def validate_data_consistency(train_df, test_df, feature_columns):
                 })
         
         if type_mismatches:
-            print("데이터 타입 불일치:")
+            print("Data type mismatches:")
             for mismatch in type_mismatches:
-                print(f"  {mismatch['feature']}: 훈련={mismatch['train_type']}, 테스트={mismatch['test_type']}")
+                print(f"  {mismatch['feature']}: train={mismatch['train_type']}, test={mismatch['test_type']}")
         
-        # 통계적 분포 비교
+        # Statistical distribution comparison
         distribution_differences = []
         
-        for feature in list(common_features)[:10]:  # 상위 10개만 확인
+        for feature in list(common_features)[:10]:  # Check top 10 only
             train_mean = train_df[feature].mean()
             test_mean = test_df[feature].mean()
             train_std = train_df[feature].std()
@@ -701,7 +701,7 @@ def validate_data_consistency(train_df, test_df, feature_columns):
             mean_diff = abs(train_mean - test_mean) / (abs(train_mean) + 1e-8)
             std_diff = abs(train_std - test_std) / (abs(train_std) + 1e-8)
             
-            if mean_diff > 0.1 or std_diff > 0.1:  # 10% 이상 차이
+            if mean_diff > 0.1 or std_diff > 0.1:  # >10% difference
                 distribution_differences.append({
                     'feature': feature,
                     'mean_diff': mean_diff,
@@ -709,9 +709,9 @@ def validate_data_consistency(train_df, test_df, feature_columns):
                 })
         
         if distribution_differences:
-            print("분포 차이가 큰 피처 (상위 5개):")
+            print("Features with large distribution differences (top 5):")
             for diff in distribution_differences[:5]:
-                print(f"  {diff['feature']}: 평균 차이 {diff['mean_diff']:.3f}, 표준편차 차이 {diff['std_diff']:.3f}")
+                print(f"  {diff['feature']}: mean diff {diff['mean_diff']:.3f}, std diff {diff['std_diff']:.3f}")
         
         is_consistent = (len(missing_in_test) == 0 and len(missing_in_train) == 0 and 
                         len(type_mismatches) == 0 and len(distribution_differences) < 5)
@@ -719,5 +719,5 @@ def validate_data_consistency(train_df, test_df, feature_columns):
         return is_consistent
         
     except Exception as e:
-        print(f"데이터 일관성 검증 실패: {e}")
+        print(f"Data consistency validation failed: {e}")
         return False

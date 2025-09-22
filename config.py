@@ -5,48 +5,48 @@ import numpy as np
 from pathlib import Path
 
 class Config:
-    # 경로 설정
+    # Path settings
     BASE_DIR = Path(__file__).parent
     DATA_DIR = BASE_DIR / "data"
     MODEL_DIR = BASE_DIR / "models"
     LOG_DIR = BASE_DIR / "logs"
     
-    # 파일 경로
+    # File paths
     TRAIN_FILE = DATA_DIR / "train.csv"
     TEST_FILE = DATA_DIR / "test.csv"
     SUBMISSION_FILE = DATA_DIR / "sample_submission.csv"
     
-    # 출력 파일
+    # Output files
     RESULT_FILE = BASE_DIR / "submission.csv"
     MODEL_FILE = MODEL_DIR / "best_model.pkl"
     SCALER_FILE = MODEL_DIR / "scaler.pkl"
     SELECTOR_FILE = MODEL_DIR / "selector.pkl"
     CV_RESULTS_FILE = MODEL_DIR / "cv_results.csv"
     
-    # 데이터 설정
+    # Data settings
     FEATURE_COLUMNS = [f'X_{i:02d}' for i in range(1, 53)]
     TARGET_COLUMN = 'target'
     ID_COLUMN = 'ID'
     
-    # 모델 설정
+    # Model settings
     N_CLASSES = 21
     RANDOM_STATE = 42
     N_JOBS = 6
     
-    # 교차 검증 설정
+    # Cross-validation settings
     CV_FOLDS = 7
     VALIDATION_SIZE = 0.2
     
-    # 피처 선택 설정
+    # Feature selection settings
     FEATURE_SELECTION_METHODS = ['mutual_info', 'f_classif', 'chi2']
     TARGET_FEATURES = 35
     
-    # 클래스 가중치 설정
+    # Class weight settings
     USE_CLASS_WEIGHTS = True
     FOCAL_LOSS_ALPHA = 1.0
     FOCAL_LOSS_GAMMA = 2.0
     
-    # LightGBM 파라미터
+    # LightGBM parameters
     LGBM_PARAMS = {
         'objective': 'multiclass',
         'num_class': N_CLASSES,
@@ -70,7 +70,7 @@ class Config:
         'class_weight': 'balanced'
     }
     
-    # XGBoost 파라미터
+    # XGBoost parameters
     XGB_PARAMS = {
         'objective': 'multi:softprob',
         'num_class': N_CLASSES,
@@ -89,7 +89,7 @@ class Config:
         'verbosity': 0
     }
     
-    # CatBoost 파라미터
+    # CatBoost parameters
     CAT_PARAMS = {
         'iterations': 500,
         'learning_rate': 0.05,
@@ -104,7 +104,7 @@ class Config:
         'auto_class_weights': 'Balanced'
     }
     
-    # Random Forest 파라미터
+    # Random Forest parameters
     RF_PARAMS = {
         'n_estimators': 300,
         'max_depth': 10,
@@ -116,7 +116,7 @@ class Config:
         'class_weight': 'balanced'
     }
     
-    # Extra Trees 파라미터
+    # Extra Trees parameters
     ET_PARAMS = {
         'n_estimators': 300,
         'max_depth': 10,
@@ -128,11 +128,11 @@ class Config:
         'class_weight': 'balanced'
     }
     
-    # 하이퍼파라미터 튜닝 설정
+    # Hyperparameter tuning settings
     OPTUNA_TRIALS = 100
     OPTUNA_TIMEOUT = 3600
     
-    # 앙상블 설정
+    # Ensemble settings
     ENSEMBLE_WEIGHTS = {
         'lightgbm': 0.3,
         'xgboost': 0.25,
@@ -141,32 +141,32 @@ class Config:
         'extra_trees': 0.1
     }
     
-    # 로깅 설정
+    # Logging settings
     LOG_LEVEL = 'INFO'
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     
-    # 메모리 설정
+    # Memory settings
     MEMORY_EFFICIENT = True
     CHUNK_SIZE = 10000
     
-    # 검증 전략 설정
+    # Validation strategy settings
     VALIDATION_STRATEGY = 'stratified'
     
-    # 클래스별 성능 임계값
+    # Class performance threshold
     CLASS_PERFORMANCE_THRESHOLD = 0.60
     
-    # 스케일링 방법
+    # Scaling method
     SCALING_METHOD = 'robust'
     
     @classmethod
     def create_directories(cls):
-        """디렉터리 생성"""
+        """Create directories"""
         for directory in [cls.MODEL_DIR, cls.LOG_DIR]:
             directory.mkdir(parents=True, exist_ok=True)
     
     @classmethod
     def get_model_params(cls, model_name):
-        """모델별 파라미터 반환"""
+        """Return model-specific parameters"""
         params_map = {
             'lightgbm': cls.LGBM_PARAMS,
             'xgboost': cls.XGB_PARAMS,
@@ -178,31 +178,31 @@ class Config:
     
     @classmethod
     def validate_config(cls):
-        """설정값 검증"""
+        """Validate configuration values"""
         errors = []
         
         if not cls.DATA_DIR.exists():
-            errors.append(f"데이터 디렉터리가 없습니다: {cls.DATA_DIR}")
+            errors.append(f"Data directory not found: {cls.DATA_DIR}")
         
         required_files = [cls.TRAIN_FILE, cls.TEST_FILE]
         for file_path in required_files:
             if not file_path.exists():
-                errors.append(f"필수 파일이 없습니다: {file_path}")
+                errors.append(f"Required file not found: {file_path}")
         
         if cls.N_CLASSES <= 0:
-            errors.append("N_CLASSES는 양수여야 합니다")
+            errors.append("N_CLASSES must be positive")
         
         if cls.CV_FOLDS < 2:
-            errors.append("CV_FOLDS는 2 이상이어야 합니다")
+            errors.append("CV_FOLDS must be 2 or greater")
         
         if cls.TARGET_FEATURES <= 0:
-            errors.append("TARGET_FEATURES는 양수여야 합니다")
+            errors.append("TARGET_FEATURES must be positive")
         
         return errors
     
     @classmethod
     def update_for_hardware(cls, available_memory_gb, cpu_cores):
-        """하드웨어 사양에 맞춰 설정 조정"""
+        """Adjust settings for hardware specifications"""
         if available_memory_gb >= 32:
             cls.N_JOBS = min(cpu_cores, 8)
             cls.CHUNK_SIZE = 15000
@@ -216,7 +216,7 @@ class Config:
             cls.CHUNK_SIZE = 5000
             cls.OPTUNA_TRIALS = 50
         
-        # 모델 파라미터 업데이트
+        # Update model parameters
         for params in [cls.LGBM_PARAMS, cls.XGB_PARAMS, cls.CAT_PARAMS, 
                       cls.RF_PARAMS, cls.ET_PARAMS]:
             if 'n_jobs' in params:
