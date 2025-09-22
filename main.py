@@ -342,49 +342,110 @@ def run_fast_mode():
         raise
 
 def run_quick_mode():
-    """Quick test execution mode"""
+    """Quick execution mode with performance analysis"""
     print("=" * 50)
     print("   Quick Test Mode")
     print("=" * 50)
     
     try:
-        # Quick mode configuration
-        Config.setup_quick_mode()
         Config.create_directories()
         
-        print("Quick mode settings:")
-        print(f"  Sample size: {Config.QUICK_SAMPLE_SIZE}")
-        print(f"  Feature count: {Config.QUICK_FEATURE_COUNT}")
-        print(f"  Model: LightGBM only")
+        # Import analysis module
+        from analysis import ModelAnalyzer
+        analyzer = ModelAnalyzer()
         
-        # Quick data processing
+        # Basic data preprocessing
         processor = DataProcessor()
-        X_train, X_test, y_train, train_ids, test_ids = processor.get_quick_processed_data()
+        X_train, X_test, y_train, train_ids, test_ids = processor.get_processed_data(
+            use_resampling=False,
+            scaling_method='robust'
+        )
         
-        print(f"Training data shape: {X_train.shape}")
-        print(f"Test data shape: {X_test.shape}")
+        # Simple split
+        X_train_split, X_val, y_train_split, y_val = train_test_split(
+            X_train, y_train,
+            test_size=0.2,
+            random_state=Config.RANDOM_STATE,
+            stratify=y_train
+        )
         
-        # Quick model training
+        print(f"Training set: {X_train_split.shape}")
+        print(f"Validation set: {X_val.shape}")
+        
+        # Basic model training (optimization disabled)
         trainer = ModelTraining()
-        model = trainer.train_quick_lightgbm(X_train, y_train)
+        models, best_model = trainer.train_all_models(
+            X_train_split, y_train_split,
+            X_val, y_val,
+            use_optimization=False
+        )
         
-        if model is not None:
-            print(f"Quick model trained: {type(model).__name__}")
+        print(f"Number of trained models: {len(models)}")
+        if best_model is not None:
+            print(f"Best performing model: {type(best_model).__name__}")
             
-            # Quick prediction
-            predictor = PredictionProcessor(model)
-            test_predictions = predictor.predict(X_test, use_calibrated=False)
+            # Performance Analysis
+            print("\n" + "=" * 50)
+            print("Performance Analysis")
+            print("=" * 50)
             
-            # Create submission
-            submission_df = predictor.create_submission_file(
-                test_ids, apply_balancing=False
+            # Get feature names
+            feature_names = list(X_train.columns)
+            
+            # Quick performance analysis
+            quick_analysis = analyzer.quick_performance_analysis(
+                best_model, X_train_split, X_val, y_train_split, y_val,
+                feature_names, type(best_model).__name__
             )
             
-            print(f"Quick test complete: {Config.RESULT_FILE}")
-            return model, submission_df
+            # Print analysis results
+            print(f"\nQuick Analysis Results:")
+            print(f"Macro F1 Score: {quick_analysis['performance_metrics']['macro_f1']:.4f}")
+            print(f"Training samples: {quick_analysis['performance_metrics']['train_samples']}")
+            print(f"Validation samples: {quick_analysis['performance_metrics']['test_samples']}")
+            print(f"Features used: {quick_analysis['performance_metrics']['features_used']}")
+            
+            if 'top_5_features' in quick_analysis['feature_analysis']:
+                print(f"\nTop 5 Important Features:")
+                for i, (feature, score) in enumerate(zip(
+                    quick_analysis['feature_analysis']['top_5_features'],
+                    quick_analysis['feature_analysis']['top_5_scores']
+                )):
+                    print(f"  {i+1}. {feature}: {score:.4f}")
+            
+            print(f"\nPerformance Recommendations:")
+            for rec in quick_analysis['recommendations']:
+                print(f"  - {rec}")
+            
+            # Generate improvement suggestions
+            suggestions = analyzer.get_improvement_suggestions()
+            if suggestions['high_priority']:
+                print(f"\nHigh Priority Improvements:")
+                for suggestion in suggestions['high_priority']:
+                    print(f"  - {suggestion}")
+        
+        # Test prediction
+        if best_model is not None:
+            predictor = PredictionProcessor(best_model)
+            test_predictions = predictor.predict(X_test, use_calibrated=False)
+            submission_df = predictor.create_submission_file(
+                test_ids, apply_balancing=True
+            )
+            
+            # Save analysis results
+            try:
+                analyzer.save_visualizations()
+                report_path = Config.MODEL_DIR / "quick_analysis_report.txt"
+                analyzer.generate_performance_report(report_path)
+                print(f"\nAnalysis report saved: {report_path}")
+            except Exception as e:
+                print(f"Analysis save failed: {e}")
         else:
-            print("Quick model training failed")
-            return None, None
+            submission_df = None
+        
+        print(f"Quick execution complete: {Config.RESULT_FILE}")
+        
+        return models, best_model, submission_df, analyzer
         
     except Exception as e:
         print(f"Error during quick execution: {e}")
