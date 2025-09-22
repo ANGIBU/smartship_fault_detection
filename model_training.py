@@ -78,7 +78,7 @@ class ModelTraining:
     def _create_cv_strategy(self, X, y):
         """Create Stratified K-Fold cross-validation strategy"""
         return StratifiedKFold(
-            n_splits=Config.CV_FOLDS, 
+            n_splits=Config.OPTUNA_CV_FOLDS, 
             shuffle=True, 
             random_state=Config.RANDOM_STATE
         )
@@ -180,11 +180,12 @@ class ModelTraining:
             model = xgb.XGBClassifier(**params)
             
             if X_val is not None and y_val is not None:
+                # Updated XGBoost early stopping usage
                 model.fit(
                     X_train, y_train,
                     sample_weight=sample_weights,
                     eval_set=[(X_val, y_val)],
-                    early_stopping_rounds=50,
+                    callbacks=[xgb.callback.EarlyStopping(rounds=50, save_best=True)],
                     verbose=False
                 )
             else:
@@ -285,7 +286,7 @@ class ModelTraining:
             return None
     
     @timer
-    def hyperparameter_optimization(self, X_train, y_train, model_type='lightgbm', n_trials=100):
+    def hyperparameter_optimization(self, X_train, y_train, model_type='lightgbm', n_trials=25):
         """Hyperparameter tuning"""
         print(f"Starting {model_type} hyperparameter tuning")
         
@@ -297,18 +298,18 @@ class ModelTraining:
                         'num_class': Config.N_CLASSES,
                         'metric': 'multi_logloss',
                         'boosting_type': 'gbdt',
-                        'num_leaves': trial.suggest_int('num_leaves', 20, 100),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
-                        'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 0.9),
-                        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 0.9),
-                        'bagging_freq': trial.suggest_int('bagging_freq', 1, 10),
-                        'min_child_samples': trial.suggest_int('min_child_samples', 10, 100),
-                        'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-                        'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
-                        'max_depth': trial.suggest_int('max_depth', 3, 10),
+                        'num_leaves': trial.suggest_int('num_leaves', 31, 70),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.05, 0.15),
+                        'feature_fraction': trial.suggest_float('feature_fraction', 0.7, 0.9),
+                        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.7, 0.9),
+                        'bagging_freq': trial.suggest_int('bagging_freq', 1, 3),
+                        'min_child_samples': trial.suggest_int('min_child_samples', 20, 80),
+                        'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 0.5),
+                        'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 0.5),
+                        'max_depth': trial.suggest_int('max_depth', 4, 8),
                         'verbose': -1,
                         'random_state': Config.RANDOM_STATE,
-                        'n_estimators': trial.suggest_int('n_estimators', 200, 800),
+                        'n_estimators': trial.suggest_int('n_estimators', 300, 700),
                         'n_jobs': 1
                     }
                     
@@ -320,19 +321,20 @@ class ModelTraining:
                     params = {
                         'objective': 'multi:softprob',
                         'num_class': Config.N_CLASSES,
-                        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
-                        'max_depth': trial.suggest_int('max_depth', 3, 10),
-                        'subsample': trial.suggest_float('subsample', 0.6, 0.9),
-                        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),
-                        'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-                        'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
-                        'gamma': trial.suggest_float('gamma', 0.0, 1.0),
-                        'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.05, 0.15),
+                        'max_depth': trial.suggest_int('max_depth', 4, 8),
+                        'subsample': trial.suggest_float('subsample', 0.7, 0.9),
+                        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 0.9),
+                        'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 0.5),
+                        'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 0.5),
+                        'gamma': trial.suggest_float('gamma', 0.0, 0.5),
+                        'min_child_weight': trial.suggest_int('min_child_weight', 1, 5),
                         'random_state': Config.RANDOM_STATE,
-                        'n_estimators': trial.suggest_int('n_estimators', 200, 800),
+                        'n_estimators': trial.suggest_int('n_estimators', 300, 700),
                         'n_jobs': 1,
                         'tree_method': 'hist',
-                        'verbosity': 0
+                        'verbosity': 0,
+                        'eval_metric': 'mlogloss'
                     }
                     
                     sample_weights, _ = self._calculate_class_weights(y_train)
@@ -340,11 +342,11 @@ class ModelTraining:
                 
                 elif model_type == 'catboost' and CATBOOST_AVAILABLE:
                     params = {
-                        'iterations': trial.suggest_int('iterations', 200, 800),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
-                        'depth': trial.suggest_int('depth', 3, 10),
-                        'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
-                        'border_count': trial.suggest_int('border_count', 32, 255),
+                        'iterations': trial.suggest_int('iterations', 300, 600),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.05, 0.15),
+                        'depth': trial.suggest_int('depth', 4, 8),
+                        'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 8),
+                        'border_count': trial.suggest_int('border_count', 64, 200),
                         'thread_count': 1,
                         'random_state': Config.RANDOM_STATE,
                         'verbose': False,
@@ -384,7 +386,7 @@ class ModelTraining:
                 return 0.0
         
         sampler = TPESampler(seed=Config.RANDOM_STATE)
-        pruner = MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+        pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=3)
         
         study = optuna.create_study(direction='maximize', sampler=sampler, pruner=pruner)
         study.optimize(objective, n_trials=n_trials, timeout=Config.OPTUNA_TIMEOUT, show_progress_bar=False)
@@ -399,7 +401,11 @@ class ModelTraining:
         """Perform model cross-validation"""
         print("Starting model cross-validation")
         
-        cv_strategy = self._create_cv_strategy(X_train, y_train)
+        cv_strategy = StratifiedKFold(
+            n_splits=Config.CV_FOLDS, 
+            shuffle=True, 
+            random_state=Config.RANDOM_STATE
+        )
         
         for model_name, model in self.models.items():
             if model is None:
@@ -558,7 +564,11 @@ class ModelTraining:
             # Validate ensemble performance
             if ensemble is not None:
                 try:
-                    cv_strategy = self._create_cv_strategy(X_train, y_train)
+                    cv_strategy = StratifiedKFold(
+                        n_splits=Config.CV_FOLDS, 
+                        shuffle=True, 
+                        random_state=Config.RANDOM_STATE
+                    )
                     ensemble_cv = cross_val_score(
                         ensemble, X_train, y_train,
                         cv=cv_strategy,

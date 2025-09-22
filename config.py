@@ -31,7 +31,7 @@ class Config:
     # Model settings
     N_CLASSES = 21
     RANDOM_STATE = 42
-    N_JOBS = 6
+    N_JOBS = 8
     
     # Cross-validation settings
     CV_FOLDS = 7
@@ -112,7 +112,8 @@ class Config:
         'n_estimators': 500,
         'n_jobs': N_JOBS,
         'tree_method': 'hist',
-        'verbosity': 0
+        'verbosity': 0,
+        'eval_metric': 'mlogloss'
     }
     
     # CatBoost parameters
@@ -154,9 +155,10 @@ class Config:
         'class_weight': 'balanced'
     }
     
-    # Hyperparameter tuning settings
-    OPTUNA_TRIALS = 100
-    OPTUNA_TIMEOUT = 3600
+    # Hyperparameter tuning settings - optimized
+    OPTUNA_TRIALS = 25
+    OPTUNA_TIMEOUT = 1800
+    OPTUNA_CV_FOLDS = 3
     
     # Ensemble settings
     ENSEMBLE_WEIGHTS = {
@@ -199,6 +201,8 @@ class Config:
         cls.VALIDATION_SIZE = 0.15
         cls.USE_CLASS_WEIGHTS = False
         cls.N_JOBS = 1
+        cls.OPTUNA_TRIALS = 10
+        cls.OPTUNA_TIMEOUT = 600
         
         print(f"Quick mode activated:")
         print(f"  Sample size: {cls.QUICK_SAMPLE_SIZE}")
@@ -246,7 +250,6 @@ class Config:
     def update_for_hardware(cls, available_memory_gb, cpu_cores):
         """Adjust settings for hardware specifications"""
         if cls.QUICK_MODE:
-            # Quick mode uses minimal resources
             cls.N_JOBS = 1
             cls.CHUNK_SIZE = cls.QUICK_SAMPLE_SIZE
             return
@@ -254,15 +257,18 @@ class Config:
         if available_memory_gb >= 32:
             cls.N_JOBS = min(cpu_cores, 8)
             cls.CHUNK_SIZE = 15000
-            cls.OPTUNA_TRIALS = 150
+            cls.OPTUNA_TRIALS = 30
+            cls.OPTUNA_TIMEOUT = 2400
         elif available_memory_gb >= 16:
             cls.N_JOBS = min(cpu_cores, 6)
             cls.CHUNK_SIZE = 10000
-            cls.OPTUNA_TRIALS = 100
+            cls.OPTUNA_TRIALS = 25
+            cls.OPTUNA_TIMEOUT = 1800
         else:
             cls.N_JOBS = min(cpu_cores, 4)
             cls.CHUNK_SIZE = 5000
-            cls.OPTUNA_TRIALS = 50
+            cls.OPTUNA_TRIALS = 15
+            cls.OPTUNA_TIMEOUT = 1200
         
         # Update model parameters
         for params in [cls.LGBM_PARAMS, cls.XGB_PARAMS, cls.CAT_PARAMS, 
