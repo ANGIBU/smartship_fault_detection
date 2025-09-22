@@ -177,19 +177,36 @@ class ModelTraining:
         try:
             sample_weights, class_weight_dict = self._calculate_class_weights(y_train)
             
-            model = xgb.XGBClassifier(**params)
-            
-            if X_val is not None and y_val is not None:
-                # Updated XGBoost early stopping usage
-                model.fit(
-                    X_train, y_train,
-                    sample_weight=sample_weights,
-                    eval_set=[(X_val, y_val)],
-                    callbacks=[xgb.callback.EarlyStopping(rounds=50, save_best=True)],
-                    verbose=False
-                )
-            else:
-                model.fit(X_train, y_train, sample_weight=sample_weights)
+            # XGBoost version compatibility
+            try:
+                # Try new XGBoost API (2.0+)
+                model = xgb.XGBClassifier(**params)
+                
+                if X_val is not None and y_val is not None:
+                    model.fit(
+                        X_train, y_train,
+                        sample_weight=sample_weights,
+                        eval_set=[(X_val, y_val)],
+                        callbacks=[xgb.callback.EarlyStopping(rounds=50, save_best=True)],
+                        verbose=False
+                    )
+                else:
+                    model.fit(X_train, y_train, sample_weight=sample_weights)
+                    
+            except (TypeError, AttributeError):
+                # Fallback to older XGBoost API
+                model = xgb.XGBClassifier(**params)
+                
+                if X_val is not None and y_val is not None:
+                    model.fit(
+                        X_train, y_train,
+                        sample_weight=sample_weights,
+                        eval_set=[(X_val, y_val)],
+                        early_stopping_rounds=50,
+                        verbose=False
+                    )
+                else:
+                    model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['xgboost'] = model
             self.logger.info("XGBoost model training completed")
