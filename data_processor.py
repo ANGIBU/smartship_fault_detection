@@ -11,6 +11,8 @@ from imblearn.over_sampling import SMOTE, ADASYN
 from imblearn.combine import SMOTEENN, SMOTETomek
 from scipy.stats import skew, kurtosis, jarque_bera
 from scipy.spatial.distance import pdist, squareform
+from scipy.signal import savgol_filter
+from sklearn.decomposition import PCA
 import gc
 import warnings
 warnings.filterwarnings('ignore')
@@ -28,6 +30,7 @@ class DataProcessor:
         self.feature_importance = {}
         self.interaction_features = []
         self.polynomial_transformer = None
+        self.pca_transformer = None
         
     @timer
     def load_data(self):
@@ -209,15 +212,63 @@ class DataProcessor:
                 if 'outlier_ratio' in Config.STATISTICAL_FEATURES:
                     df['sensor_outlier_ratio'] = (outliers / len(self.feature_columns)).astype('float32')
             
-            # Additional statistical features
+            # Time series features
             df['sensor_rms'] = np.sqrt(np.mean(sensor_data**2, axis=1)).astype('float32')
             df['sensor_energy'] = np.sum(sensor_data**2, axis=1).astype('float32')
             df['sensor_peak_to_peak'] = (np.max(sensor_data, axis=1) - np.min(sensor_data, axis=1)).astype('float32')
             
             # Percentile features
-            for percentile in [10, 90]:
+            for percentile in [10, 90, 95]:
                 col_name = f'sensor_p{percentile}'
                 df[col_name] = np.percentile(sensor_data, percentile, axis=1).astype('float32')
+            
+            # Moment features
+            df['sensor_variance'] = np.var(sensor_data, axis=1).astype('float32')
+            df['sensor_mad'] = np.median(np.abs(sensor_data - np.median(sensor_data, axis=1, keepdims=True)), axis=1).astype('float32')
+            
+            # Entropy-like features
+            df['sensor_entropy'] = self._calculate_entropy(sensor_data).astype('float32')
+        
+        return X_train, X_test
+    
+    def _calculate_entropy(self, data):
+        """Calculate entropy-like measure for sensor data"""
+        entropies = []
+        for row in data:
+            # Discretize data into bins
+            hist, _ = np.histogram(row, bins=10, density=True)
+            hist = hist + 1e-10  # Avoid log(0)
+            entropy = -np.sum(hist * np.log(hist))
+            entropies.append(entropy)
+        return np.array(entropies)
+    
+    @timer
+    def create_domain_features(self, X_train, X_test):
+        """Create domain-specific features for equipment monitoring"""
+        print("Creating domain-specific features")
+        
+        for df in [X_train, X_test]:
+            sensor_data = df[self.feature_columns].values
+            
+            # Equipment stability indicators
+            df['stability_index'] = (1 / (1 + df['sensor_cv'])).astype('float32')
+            df['consistency_score'] = (1 - df['sensor_range'] / (df['sensor_max'] + 1e-8)).astype('float32')
+            
+            # Fault detection indicators
+            df['anomaly_strength'] = (df['sensor_outlier_ratio'] * df['sensor_cv']).astype('float32')
+            df['deviation_magnitude'] = np.sqrt(df['sensor_variance']).astype('float32')
+            
+            # Signal quality measures
+            df['signal_clarity'] = (df['sensor_energy'] / (df['sensor_std'] + 1e-8)).astype('float32')
+            df['noise_level'] = (df['sensor_mad'] / (df['sensor_median'] + 1e-8)).astype('float32')
+            
+            # Operational state features
+            df['operational_efficiency'] = (df['sensor_mean'] / (df['sensor_max'] + 1e-8)).astype('float32')
+            df['load_factor'] = (df['sensor_p90'] / (df['sensor_p10'] + 1e-8)).astype('float32')
+            
+            # Cross-sensor relationships
+            df['sensor_balance'] = (df['sensor_std'] / (df['sensor_mean'] + 1e-8)).astype('float32')
+            df['uniformity_score'] = (1 / (1 + df['sensor_skew']**2 + df['sensor_kurtosis']**2)).astype('float32')
         
         return X_train, X_test
     
@@ -249,14 +300,14 @@ class DataProcessor:
         for i in range(len(self.feature_columns)):
             for j in range(i+1, len(self.feature_columns)):
                 corr_val = train_corr.iloc[i, j]
-                if abs(corr_val) > 0.75:  # Increased threshold from 0.7 to 0.75
+                if abs(corr_val) > 0.7:
                     high_corr_pairs.append((self.feature_columns[i], self.feature_columns[j], corr_val))
         
         print(f"High correlation sensor pairs: {len(high_corr_pairs)}")
         
         # Create correlation-based features
         for df in [X_train, X_test]:
-            for sensor1, sensor2, corr_val in high_corr_pairs[:15]:  # Increased from 10 to 15
+            for sensor1, sensor2, corr_val in high_corr_pairs[:20]:
                 if sensor1 in df.columns and sensor2 in df.columns:
                     # Ratio
                     df[f'{sensor1}_{sensor2}_ratio'] = (df[sensor1] / (df[sensor2] + 1e-8)).astype('float32')
@@ -264,6 +315,12 @@ class DataProcessor:
                     df[f'{sensor1}_{sensor2}_diff'] = (df[sensor1] - df[sensor2]).astype('float32')
                     # Product
                     df[f'{sensor1}_{sensor2}_product'] = (df[sensor1] * df[sensor2]).astype('float32')
+                    
+                    # Correlation strength features
+                    if abs(corr_val) > 0.85:
+                        df[f'{sensor1}_{sensor2}_norm_diff'] = (
+                            np.abs(df[sensor1] - df[sensor2]) / (np.abs(df[sensor1]) + np.abs(df[sensor2]) + 1e-8)
+                        ).astype('float32')
         
         return X_train, X_test
     
@@ -275,11 +332,12 @@ class DataProcessor:
             
         print("Creating interaction features")
         
-        # Identify top important sensors from quick analysis
+        # Identify top important sensors
         top_sensors = ['X_42', 'X_19', 'X_40', 'X_46', 'X_35', 'X_23', 'X_17', 'X_29', 'X_31', 'X_08']
         available_sensors = [s for s in top_sensors if s in X_train.columns][:Config.INTERACTION_TOP_N]
         
         for df in [X_train, X_test]:
+            # Pairwise interactions
             for i in range(len(available_sensors)):
                 for j in range(i+1, len(available_sensors)):
                     sensor1, sensor2 = available_sensors[i], available_sensors[j]
@@ -290,7 +348,27 @@ class DataProcessor:
                     # Additive interaction
                     df[f'{sensor1}_plus_{sensor2}'] = (df[sensor1] + df[sensor2]).astype('float32')
                     
-                    self.interaction_features.extend([f'{sensor1}_x_{sensor2}', f'{sensor1}_plus_{sensor2}'])
+                    # Minimum and maximum
+                    df[f'{sensor1}_{sensor2}_min'] = np.minimum(df[sensor1], df[sensor2]).astype('float32')
+                    df[f'{sensor1}_{sensor2}_max'] = np.maximum(df[sensor1], df[sensor2]).astype('float32')
+                    
+                    self.interaction_features.extend([
+                        f'{sensor1}_x_{sensor2}', f'{sensor1}_plus_{sensor2}',
+                        f'{sensor1}_{sensor2}_min', f'{sensor1}_{sensor2}_max'
+                    ])
+            
+            # Three-way interactions for top 5 sensors
+            top_3_sensors = available_sensors[:5]
+            for i in range(len(top_3_sensors)):
+                for j in range(i+1, len(top_3_sensors)):
+                    for k in range(j+1, len(top_3_sensors)):
+                        s1, s2, s3 = top_3_sensors[i], top_3_sensors[j], top_3_sensors[k]
+                        df[f'{s1}_{s2}_{s3}_mean'] = ((df[s1] + df[s2] + df[s3]) / 3).astype('float32')
+                        df[f'{s1}_{s2}_{s3}_product'] = (df[s1] * df[s2] * df[s3]).astype('float32')
+                        
+                        self.interaction_features.extend([
+                            f'{s1}_{s2}_{s3}_mean', f'{s1}_{s2}_{s3}_product'
+                        ])
         
         print(f"Created {len(self.interaction_features)} interaction features")
         return X_train, X_test
@@ -304,7 +382,7 @@ class DataProcessor:
         print("Creating polynomial features")
         
         # Select top sensors for polynomial features
-        top_sensors = ['X_42', 'X_19', 'X_40', 'X_46', 'X_35']
+        top_sensors = ['X_42', 'X_19', 'X_40', 'X_46', 'X_35', 'X_23']
         available_sensors = [s for s in top_sensors if s in X_train.columns]
         
         if len(available_sensors) == 0:
@@ -313,20 +391,110 @@ class DataProcessor:
         # Create polynomial features for selected sensors
         for df in [X_train, X_test]:
             for sensor in available_sensors:
-                # Squared terms
+                # Power transformations
                 df[f'{sensor}_squared'] = (df[sensor] ** 2).astype('float32')
+                df[f'{sensor}_cubed'] = (df[sensor] ** 3).astype('float32')
                 
-                # Square root terms (handle negative values)
+                # Root transformations
                 df[f'{sensor}_sqrt'] = np.sign(df[sensor]) * np.sqrt(np.abs(df[sensor])).astype('float32')
+                df[f'{sensor}_cbrt'] = np.sign(df[sensor]) * np.power(np.abs(df[sensor]), 1/3).astype('float32')
                 
-                # Log terms (handle non-positive values)
+                # Log transformations
                 df[f'{sensor}_log'] = np.sign(df[sensor]) * np.log1p(np.abs(df[sensor])).astype('float32')
+                df[f'{sensor}_log10'] = np.sign(df[sensor]) * np.log10(np.abs(df[sensor]) + 1).astype('float32')
+                
+                # Exponential transformations (with clipping to avoid overflow)
+                clipped_sensor = np.clip(df[sensor], -10, 10)
+                df[f'{sensor}_exp'] = np.exp(clipped_sensor).astype('float32')
+                df[f'{sensor}_tanh'] = np.tanh(df[sensor]).astype('float32')
+                
+                # Reciprocal transformation
+                df[f'{sensor}_reciprocal'] = (1 / (df[sensor] + 1e-8)).astype('float32')
+        
+        return X_train, X_test
+    
+    @timer
+    def create_pca_features(self, X_train, X_test, n_components=10):
+        """Create PCA features from sensor data"""
+        print(f"Creating PCA features with {n_components} components")
+        
+        try:
+            # Use only original sensor features for PCA
+            sensor_cols = [col for col in self.feature_columns if col in X_train.columns]
+            
+            if len(sensor_cols) < n_components:
+                n_components = len(sensor_cols)
+            
+            # Fit PCA on training data
+            self.pca_transformer = PCA(n_components=n_components, random_state=Config.RANDOM_STATE)
+            train_pca = self.pca_transformer.fit_transform(X_train[sensor_cols])
+            test_pca = self.pca_transformer.transform(X_test[sensor_cols])
+            
+            # Add PCA features
+            for i in range(n_components):
+                X_train[f'pca_{i+1:02d}'] = train_pca[:, i].astype('float32')
+                X_test[f'pca_{i+1:02d}'] = test_pca[:, i].astype('float32')
+            
+            # Calculate explained variance ratio
+            explained_variance = self.pca_transformer.explained_variance_ratio_
+            total_explained = np.sum(explained_variance)
+            
+            print(f"PCA explained variance: {total_explained:.3f}")
+            
+        except Exception as e:
+            print(f"PCA feature creation failed: {e}")
+        
+        return X_train, X_test
+    
+    @timer
+    def create_time_series_features(self, X_train, X_test):
+        """Create time series features assuming sensor order represents time"""
+        print("Creating time series features")
+        
+        for df in [X_train, X_test]:
+            sensor_data = df[self.feature_columns].values
+            
+            # Trend features
+            trends = []
+            for row in sensor_data:
+                # Calculate linear trend
+                x = np.arange(len(row))
+                trend = np.polyfit(x, row, 1)[0]  # Slope of linear fit
+                trends.append(trend)
+            
+            df['sensor_trend'] = np.array(trends).astype('float32')
+            
+            # Smoothing features
+            try:
+                smoothed_data = []
+                for row in sensor_data:
+                    if len(row) >= 5:  # Need at least 5 points for smoothing
+                        smoothed = savgol_filter(row, window_length=5, polyorder=2)
+                        smoothed_data.append(np.mean(smoothed))
+                    else:
+                        smoothed_data.append(np.mean(row))
+                
+                df['sensor_smoothed_mean'] = np.array(smoothed_data).astype('float32')
+                
+                # Calculate difference between original and smoothed
+                original_means = np.mean(sensor_data, axis=1)
+                df['sensor_smoothness'] = (original_means - df['sensor_smoothed_mean']).astype('float32')
+                
+            except Exception as e:
+                print(f"Smoothing features failed: {e}")
+                df['sensor_smoothed_mean'] = np.mean(sensor_data, axis=1).astype('float32')
+                df['sensor_smoothness'] = np.zeros(len(df)).astype('float32')
+            
+            # Seasonality indicators (assuming some periodic patterns)
+            df['sensor_first_half_mean'] = np.mean(sensor_data[:, :len(self.feature_columns)//2], axis=1).astype('float32')
+            df['sensor_second_half_mean'] = np.mean(sensor_data[:, len(self.feature_columns)//2:], axis=1).astype('float32')
+            df['sensor_half_diff'] = (df['sensor_first_half_mean'] - df['sensor_second_half_mean']).astype('float32')
         
         return X_train, X_test
     
     @timer
     def handle_class_imbalance(self, X_train, y_train, method='smote'):
-        """Handle class imbalance"""
+        """Handle class imbalance with multiple techniques"""
         print(f"Starting class imbalance handling with {method}")
         
         # Check class distribution
@@ -343,7 +511,7 @@ class DataProcessor:
         
         print(f"Imbalance ratio: {imbalance_ratio:.2f}:1")
         
-        if imbalance_ratio > 3.0:
+        if imbalance_ratio > 2.5:
             print(f"Applying {method.upper()}")
             
             try:
@@ -355,6 +523,7 @@ class DataProcessor:
                     print("Resampling not applicable, using original data")
                     return X_train, y_train
                 
+                # Apply different resampling strategies
                 if method == 'smote':
                     resampler = SMOTE(
                         sampling_strategy='auto',
@@ -379,6 +548,9 @@ class DataProcessor:
                         random_state=Config.RANDOM_STATE,
                         smote=SMOTE(random_state=Config.RANDOM_STATE, k_neighbors=k_neighbors)
                     )
+                elif method == 'balanced':
+                    # Custom balanced sampling
+                    return self._balanced_sampling(X_train, y_train)
                 else:
                     print(f"Unknown method {method}, using SMOTE")
                     resampler = SMOTE(
@@ -401,9 +573,33 @@ class DataProcessor:
             print("Class balance is appropriate, skipping resampling")
             return X_train, y_train
     
+    def _balanced_sampling(self, X_train, y_train):
+        """Custom balanced sampling method"""
+        class_counts = y_train.value_counts()
+        target_count = int(class_counts.median())
+        
+        balanced_indices = []
+        
+        for class_id in class_counts.index:
+            class_indices = y_train[y_train == class_id].index.tolist()
+            
+            if len(class_indices) >= target_count:
+                # Undersample
+                sampled_indices = np.random.choice(class_indices, target_count, replace=False)
+            else:
+                # Oversample
+                sampled_indices = np.random.choice(class_indices, target_count, replace=True)
+            
+            balanced_indices.extend(sampled_indices)
+        
+        X_balanced = X_train.iloc[balanced_indices].reset_index(drop=True)
+        y_balanced = y_train.iloc[balanced_indices].reset_index(drop=True)
+        
+        return X_balanced, y_balanced
+    
     @timer
     def scale_features(self, X_train, X_test, method='robust'):
-        """Feature scaling"""
+        """Feature scaling with multiple methods"""
         print(f"Starting feature scaling ({method})")
         
         if method == 'robust':
@@ -440,7 +636,7 @@ class DataProcessor:
     
     @timer
     def select_features(self, X_train, X_test, y_train, n_features=None):
-        """Feature selection"""
+        """Feature selection with multiple methods"""
         if n_features is None:
             n_features = Config.TARGET_FEATURES
         
@@ -463,7 +659,7 @@ class DataProcessor:
         # Apply multiple feature selection methods with different weights
         feature_scores = {}
         
-        # Mutual Information (weight: 0.4)
+        # Mutual Information (weight: 0.35)
         try:
             mi_selector = SelectKBest(mutual_info_classif, k=n_features)
             mi_selector.fit(X_train, y_train)
@@ -472,11 +668,11 @@ class DataProcessor:
             for i, col in enumerate(X_train.columns):
                 if col not in feature_scores:
                     feature_scores[col] = 0
-                feature_scores[col] += 0.4 * mi_scores[i] / np.max(mi_scores)
+                feature_scores[col] += 0.35 * mi_scores[i] / np.max(mi_scores)
         except Exception as e:
             print(f"Mutual Information calculation failed: {e}")
         
-        # F-test (weight: 0.3)
+        # F-test (weight: 0.25)
         try:
             f_selector = SelectKBest(f_classif, k=n_features)
             f_selector.fit(X_train, y_train)
@@ -485,11 +681,11 @@ class DataProcessor:
             for i, col in enumerate(X_train.columns):
                 if col not in feature_scores:
                     feature_scores[col] = 0
-                feature_scores[col] += 0.3 * f_scores[i] / np.max(f_scores)
+                feature_scores[col] += 0.25 * f_scores[i] / np.max(f_scores)
         except Exception as e:
             print(f"F-test calculation failed: {e}")
         
-        # Tree-based feature importance (weight: 0.3)
+        # Tree-based feature importance (weight: 0.25)
         try:
             rf_selector = RandomForestClassifier(
                 n_estimators=100, 
@@ -503,9 +699,21 @@ class DataProcessor:
             for i, col in enumerate(X_train.columns):
                 if col not in feature_scores:
                     feature_scores[col] = 0
-                feature_scores[col] += 0.3 * rf_scores[i]
+                feature_scores[col] += 0.25 * rf_scores[i]
         except Exception as e:
             print(f"Random Forest feature importance calculation failed: {e}")
+        
+        # Variance-based selection (weight: 0.15)
+        try:
+            variances = X_train.var()
+            normalized_variances = variances / variances.max()
+            
+            for col in X_train.columns:
+                if col not in feature_scores:
+                    feature_scores[col] = 0
+                feature_scores[col] += 0.15 * normalized_variances[col]
+        except Exception as e:
+            print(f"Variance calculation failed: {e}")
         
         # Score-based feature selection
         if feature_scores:
@@ -528,10 +736,12 @@ class DataProcessor:
         # Analyze selected feature types
         original_count = sum(1 for f in self.selected_features if f in self.feature_columns)
         statistical_count = sum(1 for f in self.selected_features if 'sensor_' in f)
-        interaction_count = sum(1 for f in self.selected_features if ('_x_' in f or '_plus_' in f))
+        interaction_count = sum(1 for f in self.selected_features if ('_x_' in f or '_plus_' in f or '_min' in f or '_max' in f))
         correlation_count = sum(1 for f in self.selected_features if ('_ratio' in f or '_diff' in f or '_product' in f))
-        polynomial_count = sum(1 for f in self.selected_features if ('_squared' in f or '_sqrt' in f or '_log' in f))
-        other_count = len(self.selected_features) - original_count - statistical_count - interaction_count - correlation_count - polynomial_count
+        polynomial_count = sum(1 for f in self.selected_features if ('_squared' in f or '_sqrt' in f or '_log' in f or '_cubed' in f))
+        pca_count = sum(1 for f in self.selected_features if f.startswith('pca_'))
+        domain_count = sum(1 for f in self.selected_features if f in ['stability_index', 'consistency_score', 'anomaly_strength', 'deviation_magnitude'])
+        other_count = len(self.selected_features) - original_count - statistical_count - interaction_count - correlation_count - polynomial_count - pca_count - domain_count
         
         print(f"Feature type distribution:")
         print(f"  Original sensors: {original_count}")
@@ -539,6 +749,8 @@ class DataProcessor:
         print(f"  Interaction: {interaction_count}")
         print(f"  Correlation: {correlation_count}")
         print(f"  Polynomial: {polynomial_count}")
+        print(f"  PCA: {pca_count}")
+        print(f"  Domain: {domain_count}")
         if other_count > 0:
             print(f"  Other: {other_count}")
         
@@ -596,29 +808,38 @@ class DataProcessor:
             # 2. Create statistical features
             X_train, X_test = self.create_statistical_features(X_train, X_test)
             
-            # 3. Create correlation features
+            # 3. Create domain-specific features
+            X_train, X_test = self.create_domain_features(X_train, X_test)
+            
+            # 4. Create correlation features
             X_train, X_test = self.create_correlation_features(X_train, X_test)
             
-            # 4. Create interaction features
+            # 5. Create interaction features
             X_train, X_test = self.create_interaction_features(X_train, X_test)
             
-            # 5. Create polynomial features
+            # 6. Create polynomial features
             X_train, X_test = self.create_polynomial_features(X_train, X_test)
             
-            # 6. Scaling
+            # 7. Create PCA features
+            X_train, X_test = self.create_pca_features(X_train, X_test, n_components=8)
+            
+            # 8. Create time series features
+            X_train, X_test = self.create_time_series_features(X_train, X_test)
+            
+            # 9. Scaling
             X_train, X_test = self.scale_features(X_train, X_test, scaling_method)
             
-            # 7. Feature selection
+            # 10. Feature selection
             X_train, X_test = self.select_features(X_train, X_test, y_train)
             
-            # 8. Handle class imbalance
+            # 11. Handle class imbalance
             if use_resampling:
                 X_train, y_train = self.handle_class_imbalance(X_train, y_train, resampling_method)
                 # Adjust IDs after resampling
                 if len(X_train) != len(train_ids):
                     train_ids = pd.Series(range(len(X_train)), name=Config.ID_COLUMN)
             
-            # 9. Final validation
+            # 12. Final validation
             print("Final data validation")
             
             train_nan_count = X_train.isna().sum().sum()

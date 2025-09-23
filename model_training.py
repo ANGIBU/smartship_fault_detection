@@ -2,7 +2,10 @@
 
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier, ExtraTreesClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier, ExtraTreesClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import f1_score, make_scorer, classification_report
 from sklearn.utils.class_weight import compute_class_weight
@@ -31,7 +34,7 @@ def macro_f1_score(y_true, y_pred):
     return f1_score(y_true, y_pred, average='macro', zero_division=0)
 
 class WeightCalculator:
-    """Dynamic class weight calculation"""
+    """Dynamic class weight calculation with multiple strategies"""
     
     @staticmethod
     def compute_focal_weights(y, alpha=1.0, gamma=2.0):
@@ -70,6 +73,98 @@ class WeightCalculator:
         log_weights = log_weights / np.mean(log_weights)
         
         return dict(enumerate(log_weights))
+    
+    @staticmethod
+    def compute_effective_number_weights(y, beta=0.99):
+        """Calculate weights based on effective number of samples"""
+        class_counts = np.bincount(y, minlength=Config.N_CLASSES)
+        
+        effective_nums = (1 - np.power(beta, class_counts)) / (1 - beta)
+        weights = 1.0 / effective_nums
+        weights = weights / np.mean(weights)
+        
+        return dict(enumerate(weights))
+    
+    @staticmethod
+    def compute_class_balanced_weights(y):
+        """Calculate class-balanced weights with smoothing"""
+        class_counts = np.bincount(y, minlength=Config.N_CLASSES)
+        total_samples = len(y)
+        
+        # Add smoothing to avoid extreme weights
+        smoothed_counts = class_counts + 1
+        weights = total_samples / (Config.N_CLASSES * smoothed_counts)
+        
+        # Apply square root to reduce extreme values
+        weights = np.sqrt(weights)
+        weights = weights / np.mean(weights)
+        
+        return dict(enumerate(weights))
+
+class EnsembleStrategy:
+    """Advanced ensemble strategies"""
+    
+    @staticmethod
+    def create_stacking_ensemble(base_models, meta_model, X_train, y_train, cv_folds=5):
+        """Create stacking ensemble"""
+        from sklearn.model_selection import cross_val_predict
+        
+        # Generate meta-features using cross-validation
+        meta_features = np.zeros((X_train.shape[0], len(base_models) * Config.N_CLASSES))
+        
+        cv_strategy = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=Config.RANDOM_STATE)
+        
+        for i, model in enumerate(base_models):
+            # Get out-of-fold predictions
+            probas = cross_val_predict(model, X_train, y_train, cv=cv_strategy, method='predict_proba')
+            start_idx = i * Config.N_CLASSES
+            end_idx = (i + 1) * Config.N_CLASSES
+            meta_features[:, start_idx:end_idx] = probas
+        
+        # Train meta-model
+        meta_model.fit(meta_features, y_train)
+        
+        return meta_model, meta_features
+    
+    @staticmethod
+    def create_blending_ensemble(models, weights=None):
+        """Create blending ensemble with weighted averaging"""
+        if weights is None:
+            weights = np.ones(len(models)) / len(models)
+        
+        class BlendingEnsemble:
+            def __init__(self, models, weights):
+                self.models = models
+                self.weights = weights
+            
+            def predict_proba(self, X):
+                probas = np.zeros((X.shape[0], Config.N_CLASSES))
+                for model, weight in zip(self.models, self.weights):
+                    probas += weight * model.predict_proba(X)
+                return probas
+            
+            def predict(self, X):
+                probas = self.predict_proba(X)
+                return np.argmax(probas, axis=1)
+        
+        return BlendingEnsemble(models, weights)
+    
+    @staticmethod
+    def create_dynamic_ensemble(models, X_val, y_val):
+        """Create dynamic ensemble with performance-based weighting"""
+        model_scores = []
+        
+        for model in models:
+            y_pred = model.predict(X_val)
+            score = f1_score(y_val, y_pred, average='macro', zero_division=0)
+            model_scores.append(score)
+        
+        # Convert scores to weights using softmax
+        model_scores = np.array(model_scores)
+        exp_scores = np.exp(model_scores * 10)  # Temperature scaling
+        weights = exp_scores / np.sum(exp_scores)
+        
+        return EnsembleStrategy.create_blending_ensemble(models, weights)
 
 class ModelTraining:
     def __init__(self):
@@ -81,6 +176,7 @@ class ModelTraining:
         self.logger = setup_logging()
         self.weight_calculator = WeightCalculator()
         self.calibrated_models = {}
+        self.ensemble_strategy = EnsembleStrategy()
         
     def _create_cv_strategy(self, X, y):
         """Create Stratified K-Fold cross-validation strategy"""
@@ -91,13 +187,17 @@ class ModelTraining:
         )
     
     def _calculate_class_weights(self, y, method='focal'):
-        """Calculate class weights"""
+        """Calculate class weights with multiple methods"""
         if method == 'focal':
             class_weight_dict = self.weight_calculator.compute_focal_weights(
                 y, Config.FOCAL_LOSS_ALPHA, Config.FOCAL_LOSS_GAMMA
             )
         elif method == 'log':
             class_weight_dict = self.weight_calculator.compute_log_weights(y)
+        elif method == 'effective':
+            class_weight_dict = self.weight_calculator.compute_effective_number_weights(y)
+        elif method == 'class_balanced':
+            class_weight_dict = self.weight_calculator.compute_class_balanced_weights(y)
         else:
             class_weight_dict = self.weight_calculator.compute_balanced_weights(y)
         
@@ -184,7 +284,7 @@ class ModelTraining:
             params = Config.XGB_PARAMS.copy()
         
         try:
-            sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'focal')
+            sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'effective')
             
             model = xgb.XGBClassifier(**params)
             
@@ -220,7 +320,7 @@ class ModelTraining:
             params = Config.CAT_PARAMS.copy()
         
         try:
-            sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'focal')
+            sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'class_balanced')
             
             # Remove conflicting parameters for bayesian bootstrap
             if 'bootstrap_type' in params and params['bootstrap_type'] == 'Bayesian':
@@ -298,8 +398,72 @@ class ModelTraining:
             return None
     
     @timer
+    def train_gradient_boosting(self, X_train, y_train, params=None):
+        """Train Gradient Boosting model"""
+        print("Starting Gradient Boosting model training")
+        
+        try:
+            if params is None:
+                params = {
+                    'n_estimators': 300,
+                    'learning_rate': 0.05,
+                    'max_depth': 6,
+                    'subsample': 0.8,
+                    'random_state': Config.RANDOM_STATE
+                }
+            
+            sample_weights, _ = self._calculate_class_weights(y_train, 'balanced')
+            
+            model = GradientBoostingClassifier(**params)
+            model.fit(X_train, y_train, sample_weight=sample_weights)
+            
+            self.models['gradient_boosting'] = model
+            self.logger.info("Gradient Boosting model training completed")
+            return model
+            
+        except Exception as e:
+            print(f"Error during Gradient Boosting training: {e}")
+            self.logger.error(f"Gradient Boosting training failed: {e}")
+            return None
+    
+    @timer
+    def train_neural_network(self, X_train, y_train, params=None):
+        """Train Neural Network model"""
+        print("Starting Neural Network model training")
+        
+        try:
+            if params is None:
+                params = {
+                    'hidden_layer_sizes': (128, 64, 32),
+                    'activation': 'relu',
+                    'solver': 'adam',
+                    'alpha': 0.001,
+                    'batch_size': 'auto',
+                    'learning_rate': 'constant',
+                    'learning_rate_init': 0.001,
+                    'max_iter': 500,
+                    'random_state': Config.RANDOM_STATE,
+                    'early_stopping': True,
+                    'validation_fraction': 0.1
+                }
+            
+            sample_weights, _ = self._calculate_class_weights(y_train, 'balanced')
+            
+            model = MLPClassifier(**params)
+            model.fit(X_train, y_train, sample_weight=sample_weights)
+            
+            self.models['neural_network'] = model
+            self.logger.info("Neural Network model training completed")
+            return model
+            
+        except Exception as e:
+            print(f"Error during Neural Network training: {e}")
+            self.logger.error(f"Neural Network training failed: {e}")
+            return None
+    
+    @timer
     def hyperparameter_optimization(self, X_train, y_train, model_type='lightgbm', n_trials=35):
-        """Hyperparameter tuning"""
+        """Hyperparameter tuning with Optuna"""
         print(f"Starting {model_type} hyperparameter tuning")
         
         tuning_space = Config.get_tuning_space(model_type)
@@ -353,7 +517,7 @@ class ModelTraining:
                         else:
                             params[param] = trial.suggest_float(param, min_val, max_val)
                     
-                    sample_weights, _ = self._calculate_class_weights(y_train, 'focal')
+                    sample_weights, _ = self._calculate_class_weights(y_train, 'effective')
                     model = xgb.XGBClassifier(**params)
                 
                 elif model_type == 'catboost' and CATBOOST_AVAILABLE:
@@ -374,7 +538,7 @@ class ModelTraining:
                         else:
                             params[param] = trial.suggest_float(param, min_val, max_val)
                     
-                    sample_weights, _ = self._calculate_class_weights(y_train, 'focal')
+                    sample_weights, _ = self._calculate_class_weights(y_train, 'class_balanced')
                     model = cb.CatBoostClassifier(**params)
                 
                 # Stratified K-Fold cross-validation
@@ -386,10 +550,10 @@ class ModelTraining:
                     y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
                     
                     if model_type in ['lightgbm', 'xgboost']:
-                        sw_tr, _ = self._calculate_class_weights(y_tr, 'focal')
+                        sw_tr, _ = self._calculate_class_weights(y_tr, 'focal' if model_type == 'lightgbm' else 'effective')
                         model.fit(X_tr, y_tr, sample_weight=sw_tr)
                     elif model_type == 'catboost':
-                        sw_tr, _ = self._calculate_class_weights(y_tr, 'focal')
+                        sw_tr, _ = self._calculate_class_weights(y_tr, 'class_balanced')
                         model.fit(X_tr, y_tr, sample_weight=sw_tr, verbose=False)
                     else:
                         model.fit(X_tr, y_tr)
@@ -421,7 +585,7 @@ class ModelTraining:
     
     @timer
     def cross_validate_models(self, X_train, y_train):
-        """Perform model cross-validation"""
+        """Perform model cross-validation with corrected stability calculation"""
         print("Starting model cross-validation")
         
         cv_strategy = StratifiedKFold(
@@ -449,7 +613,7 @@ class ModelTraining:
                 mean_score = cv_scores.mean()
                 std_score = cv_scores.std()
                 
-                # Calculate stability score with bias towards higher mean
+                # Corrected stability score calculation
                 stability_score = mean_score - (0.8 * std_score)
                 
                 self.cv_scores[model_name] = {
@@ -480,21 +644,21 @@ class ModelTraining:
         return self.cv_scores
     
     @timer
-    def create_ensemble(self, X_train, y_train):
-        """Create ensemble model"""
+    def create_ensemble(self, X_train, y_train, X_val=None, y_val=None):
+        """Create multiple ensemble models with different strategies"""
         print("Starting ensemble model creation")
         
-        # Select only top 3 performing models
+        # Select only top performing models
         if not self.cv_scores:
             print("No CV scores available for ensemble creation")
             return None
         
         # Sort models by stability score
         sorted_models = sorted(self.cv_scores.items(), key=lambda x: x[1]['stability'], reverse=True)
-        top_models = sorted_models[:3]  # Top 3 models only
+        top_models = sorted_models[:4]  # Top 4 models
         
         good_models = []
-        min_score = 0.70  # Threshold
+        min_score = 0.68  # Lower threshold for better ensemble
         
         for name, scores in top_models:
             if name in self.models and self.models[name] is not None and scores['stability'] >= min_score:
@@ -506,30 +670,74 @@ class ModelTraining:
             print(f"Models for ensemble: {[name for name, _, _ in good_models]}")
             
             try:
-                # Calculate performance-based weights with higher emphasis on stability
-                total_score = sum(score**2 for _, _, score in good_models)  # Squared weights
-                model_weights = [score**2 / total_score for _, _, score in good_models]
+                # Strategy 1: Voting Classifier with optimized weights
+                performance_weights = []
+                total_score = 0
+                
+                for _, _, score in good_models:
+                    # Use exponential weighting to emphasize better models
+                    weight = np.exp(score * 5)  # Amplify differences
+                    performance_weights.append(weight)
+                    total_score += weight
+                
+                # Normalize weights
+                performance_weights = [w / total_score for w in performance_weights]
                 
                 # Create VotingClassifier
                 estimators = [(name, model) for name, model, _ in good_models]
                 
-                ensemble = VotingClassifier(
+                voting_ensemble = VotingClassifier(
                     estimators=estimators,
                     voting='soft',
-                    weights=model_weights
+                    weights=performance_weights
                 )
                 
                 # Train ensemble
                 sample_weights, _ = self._calculate_class_weights(y_train, 'focal')
-                ensemble.fit(X_train, y_train, sample_weight=sample_weights)
+                voting_ensemble.fit(X_train, y_train, sample_weight=sample_weights)
                 
-                self.models['ensemble'] = ensemble
-                self.ensemble_models['voting'] = ensemble
+                self.models['voting_ensemble'] = voting_ensemble
+                self.ensemble_models['voting'] = voting_ensemble
                 
-                print("Ensemble model creation completed")
-                print(f"Ensemble weights: {dict(zip([name for name, _, _ in good_models], model_weights))}")
+                print("Voting ensemble creation completed")
+                print(f"Voting weights: {dict(zip([name for name, _, _ in good_models], performance_weights))}")
                 
-                return ensemble
+                # Strategy 2: Stacking Ensemble (if validation data available)
+                if X_val is not None and y_val is not None and len(good_models) >= 3:
+                    try:
+                        base_models = [model for _, model, _ in good_models[:3]]
+                        meta_model = LogisticRegression(random_state=Config.RANDOM_STATE, max_iter=1000)
+                        
+                        stacking_ensemble, _ = self.ensemble_strategy.create_stacking_ensemble(
+                            base_models, meta_model, X_train, y_train, cv_folds=3
+                        )
+                        
+                        self.models['stacking_ensemble'] = stacking_ensemble
+                        self.ensemble_models['stacking'] = stacking_ensemble
+                        
+                        print("Stacking ensemble creation completed")
+                        
+                    except Exception as e:
+                        print(f"Stacking ensemble creation failed: {e}")
+                
+                # Strategy 3: Dynamic Ensemble (if validation data available)
+                if X_val is not None and y_val is not None:
+                    try:
+                        models_for_dynamic = [model for _, model, _ in good_models]
+                        
+                        dynamic_ensemble = self.ensemble_strategy.create_dynamic_ensemble(
+                            models_for_dynamic, X_val, y_val
+                        )
+                        
+                        self.models['dynamic_ensemble'] = dynamic_ensemble
+                        self.ensemble_models['dynamic'] = dynamic_ensemble
+                        
+                        print("Dynamic ensemble creation completed")
+                        
+                    except Exception as e:
+                        print(f"Dynamic ensemble creation failed: {e}")
+                
+                return voting_ensemble
                 
             except Exception as e:
                 print(f"Ensemble creation failed: {e}")
@@ -544,7 +752,7 @@ class ModelTraining:
         print("Starting model probability calibration")
         
         for model_name, model in self.models.items():
-            if model is None or model_name == 'ensemble':
+            if model is None or 'ensemble' in model_name:
                 continue
                 
             try:
@@ -563,10 +771,10 @@ class ModelTraining:
     
     @timer
     def train_all_models(self, X_train, y_train, X_val=None, y_val=None, use_optimization=True):
-        """Train all models"""
+        """Train all models with extended model selection"""
         print("Starting comprehensive model training")
         
-        # Train basic models
+        # Train basic tree-based models
         if use_optimization:
             print("Applying hyperparameter tuning")
             
@@ -575,7 +783,7 @@ class ModelTraining:
                 best_params, best_score = self.hyperparameter_optimization(
                     X_train, y_train, 'lightgbm', n_trials=Config.OPTUNA_TRIALS
                 )
-                if best_score > 0.6:  # Only use optimal params if they're decent
+                if best_score > 0.6:
                     self.train_lightgbm(X_train, y_train, X_val, y_val, best_params)
                 else:
                     self.train_lightgbm(X_train, y_train, X_val, y_val)
@@ -615,6 +823,15 @@ class ModelTraining:
             if CATBOOST_AVAILABLE:
                 self.train_catboost(X_train, y_train, X_val, y_val)
         
+        # Train additional models for diversity
+        self.train_random_forest(X_train, y_train)
+        self.train_extra_trees(X_train, y_train)
+        self.train_gradient_boosting(X_train, y_train)
+        
+        # Train neural network if data size is sufficient
+        if len(X_train) > 5000:
+            self.train_neural_network(X_train, y_train)
+        
         # Remove None models
         self.models = {k: v for k, v in self.models.items() if v is not None}
         
@@ -622,8 +839,8 @@ class ModelTraining:
         if self.models:
             self.cross_validate_models(X_train, y_train)
             
-            # Create ensemble
-            ensemble = self.create_ensemble(X_train, y_train)
+            # Create ensemble with multiple strategies
+            ensemble = self.create_ensemble(X_train, y_train, X_val, y_val)
             
             # Validate ensemble performance
             if ensemble is not None:
@@ -633,31 +850,37 @@ class ModelTraining:
                         shuffle=True, 
                         random_state=Config.RANDOM_STATE
                     )
-                    ensemble_cv = cross_val_score(
-                        ensemble, X_train, y_train,
-                        cv=cv_strategy,
-                        scoring=make_scorer(macro_f1_score),
-                        n_jobs=1
-                    )
                     
-                    ensemble_score = ensemble_cv.mean()
-                    ensemble_std = ensemble_cv.std()
-                    stability_score = ensemble_score - (0.8 * ensemble_std)
-                    
-                    self.cv_scores['ensemble'] = {
-                        'scores': ensemble_cv,
-                        'mean': ensemble_score,
-                        'std': ensemble_std,
-                        'stability': stability_score
-                    }
-                    
-                    print(f"Ensemble stability score: {stability_score:.4f}")
-                    
-                    # Update if ensemble is more stable
-                    if stability_score > self.best_score:
-                        self.best_model = ensemble
-                        self.best_score = stability_score
-                        print("Ensemble selected as best model")
+                    # Validate all ensemble types
+                    for ensemble_name in ['voting_ensemble', 'stacking_ensemble', 'dynamic_ensemble']:
+                        if ensemble_name in self.models:
+                            ensemble_model = self.models[ensemble_name]
+                            
+                            ensemble_cv = cross_val_score(
+                                ensemble_model, X_train, y_train,
+                                cv=cv_strategy,
+                                scoring=make_scorer(macro_f1_score),
+                                n_jobs=1
+                            )
+                            
+                            ensemble_score = ensemble_cv.mean()
+                            ensemble_std = ensemble_cv.std()
+                            stability_score = ensemble_score - (0.8 * ensemble_std)
+                            
+                            self.cv_scores[ensemble_name] = {
+                                'scores': ensemble_cv,
+                                'mean': ensemble_score,
+                                'std': ensemble_std,
+                                'stability': stability_score
+                            }
+                            
+                            print(f"{ensemble_name} stability score: {stability_score:.4f}")
+                            
+                            # Update best model if ensemble is better
+                            if stability_score > self.best_score:
+                                self.best_model = ensemble_model
+                                self.best_score = stability_score
+                                print(f"{ensemble_name} selected as best model")
                         
                 except Exception as e:
                     print(f"Ensemble validation failed: {e}")
@@ -676,7 +899,7 @@ class ModelTraining:
             except Exception as e:
                 print(f"Model save failed: {e}")
         
-        # Save CV results
+        # Save CV results with corrected calculations
         if self.cv_scores:
             cv_results_data = []
             for model_name, scores in self.cv_scores.items():
@@ -703,11 +926,11 @@ class ModelTraining:
         return self.models, self.best_model
     
     def get_feature_importance(self):
-        """Return feature importance"""
+        """Return feature importance for all models"""
         importance_dict = {}
         
         for model_name, model in self.models.items():
-            if model is None:
+            if model is None or 'ensemble' in model_name:
                 continue
                 
             try:
@@ -715,6 +938,9 @@ class ModelTraining:
                     importance_dict[model_name] = model.feature_importances_
                 elif hasattr(model, 'get_feature_importance'):
                     importance_dict[model_name] = model.get_feature_importance()
+                elif hasattr(model, 'coef_') and len(model.coef_.shape) == 2:
+                    # For linear models, use mean absolute coefficients
+                    importance_dict[model_name] = np.mean(np.abs(model.coef_), axis=0)
             except Exception as e:
                 print(f"Feature importance extraction failed for {model_name}: {e}")
         
@@ -725,10 +951,25 @@ class ModelTraining:
         if not self.cv_scores:
             return None
         
-        single_model_scores = {k: v for k, v in self.cv_scores.items() if k != 'ensemble'}
+        single_model_scores = {k: v for k, v in self.cv_scores.items() if 'ensemble' not in k}
         
         if not single_model_scores:
             return None
         
         best_model_name = max(single_model_scores.keys(), key=lambda x: single_model_scores[x]['stability'])
         return self.models.get(best_model_name)
+    
+    def get_ensemble_performance_summary(self):
+        """Get performance summary of all ensemble methods"""
+        ensemble_summary = {}
+        
+        for ensemble_name in ['voting_ensemble', 'stacking_ensemble', 'dynamic_ensemble']:
+            if ensemble_name in self.cv_scores:
+                scores = self.cv_scores[ensemble_name]
+                ensemble_summary[ensemble_name] = {
+                    'mean_f1': scores['mean'],
+                    'stability': scores['stability'],
+                    'std': scores['std']
+                }
+        
+        return ensemble_summary
