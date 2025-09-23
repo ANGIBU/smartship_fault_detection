@@ -387,6 +387,7 @@ def run_quick_mode():
         # Performance Analysis (silent processing)
         quick_analysis = None
         suggestions = None
+        validation_passed = False
         
         if best_model is not None:
             print("Running performance analysis...")
@@ -399,6 +400,8 @@ def run_quick_mode():
                 best_model, X_train_split, X_val, y_train_split, y_val,
                 feature_names, type(best_model).__name__
             )
+            
+            validation_passed = quick_analysis.get('validation_passed', False)
             
             # Generate improvement suggestions
             try:
@@ -415,7 +418,7 @@ def run_quick_mode():
                 test_ids, apply_balancing=True
             )
             
-            # Save analysis results
+            # Save analysis results (visualization files will be cleaned up automatically)
             try:
                 analyzer.save_visualizations()
                 report_path = Config.MODEL_DIR / "quick_analysis_report.txt"
@@ -455,6 +458,12 @@ def run_quick_mode():
             
             print(f"Performance Level: {performance_level}")
             
+            # Statistical validation result
+            if validation_passed:
+                print("Statistical Validation: PASSED")
+            else:
+                print("Statistical Validation: FAILED (check logs for details)")
+            
             # Top important features
             if 'top_5_features' in quick_analysis['feature_analysis']:
                 print(f"\nTop 5 Most Important Features:")
@@ -478,11 +487,15 @@ def run_quick_mode():
             
             # Visualization files info
             print(f"\nGenerated Analysis Files:")
-            print(f"  - Performance Report: {Config.MODEL_DIR}/quick_analysis_report.txt")
+            print(f"  - Performance Report: results/quick_analysis_report.txt")
+            print(f"  - CV Results: results/cv_results.csv")  
+            print(f"  - Performance Summary: results/performance_summary.csv")
+            print(f"  - Comprehensive Report: results/fault_detection_report.pdf")
             print(f"  - Submission File: {Config.RESULT_FILE}")
             
             print("\n" + "=" * 60)
             print("Analysis results saved in results/ directory")
+            print("Temporary PNG files automatically cleaned up")
             print("=" * 60)
         
         return models, best_model, submission_df, analyzer

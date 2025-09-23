@@ -16,6 +16,8 @@ import matplotlib.backends.backend_pdf
 from config import Config
 from utils import timer, calculate_macro_f1
 import gc
+import os
+import shutil
 
 # Set matplotlib backend and style
 plt.rcParams['font.family'] = ['DejaVu Sans', 'Arial', 'sans-serif']
@@ -32,6 +34,7 @@ class ModelAnalyzer:
         self.results_dir = Path("results")
         self.results_dir.mkdir(exist_ok=True)
         self.performance_data = []
+        self.generated_png_files = []
         
     def create_performance_summary_csv(self, cv_scores_dict, execution_times=None):
         """Create comprehensive performance summary CSV"""
@@ -146,6 +149,7 @@ class ModelAnalyzer:
         # Save chart
         chart_path = self.results_dir / "model_comparison.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
+        self.generated_png_files.append(chart_path)
         
         self.figures['model_comparison'] = fig
         print(f"Model comparison chart saved: {chart_path}")
@@ -213,6 +217,7 @@ class ModelAnalyzer:
         # Save chart
         chart_path = self.results_dir / "sensor_importance.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
+        self.generated_png_files.append(chart_path)
         
         self.figures['sensor_importance'] = fig
         print(f"Sensor importance chart saved: {chart_path}")
@@ -285,6 +290,7 @@ class ModelAnalyzer:
         # Save chart
         chart_path = self.results_dir / "class_performance.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
+        self.generated_png_files.append(chart_path)
         
         self.figures['class_performance'] = fig
         print(f"Class performance chart saved: {chart_path}")
@@ -365,6 +371,7 @@ class ModelAnalyzer:
         # Save chart
         chart_path = self.results_dir / "system_analysis.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
+        self.generated_png_files.append(chart_path)
         
         self.figures['system_analysis'] = fig
         print(f"System analysis chart saved: {chart_path}")
@@ -404,6 +411,165 @@ class ModelAnalyzer:
         print(f"Comprehensive PDF report saved: {pdf_path}")
         return pdf_path
     
+    def move_analysis_files_to_results(self):
+        """Move analysis files from models to results directory"""
+        models_dir = Path("models")
+        
+        # Files to move
+        files_to_move = [
+            "cv_results.csv",
+            "quick_analysis_report.txt"
+        ]
+        
+        moved_files = []
+        for filename in files_to_move:
+            source_path = models_dir / filename
+            if source_path.exists():
+                dest_path = self.results_dir / filename
+                try:
+                    shutil.move(str(source_path), str(dest_path))
+                    moved_files.append(filename)
+                    print(f"Moved {filename} to results directory")
+                except Exception as e:
+                    print(f"Failed to move {filename}: {e}")
+        
+        return moved_files
+    
+    def cleanup_png_files(self):
+        """Delete generated PNG files after PDF creation"""
+        deleted_files = []
+        for png_path in self.generated_png_files:
+            try:
+                if png_path.exists():
+                    os.remove(png_path)
+                    deleted_files.append(png_path.name)
+                    print(f"Deleted temporary PNG: {png_path.name}")
+            except Exception as e:
+                print(f"Failed to delete {png_path.name}: {e}")
+        
+        # Also check for visualization files
+        visualization_files = [
+            self.results_dir / "model_comparison_visualization.png",
+            self.results_dir / "system_analysis_visualization.png"
+        ]
+        
+        for viz_file in visualization_files:
+            try:
+                if viz_file.exists():
+                    os.remove(viz_file)
+                    deleted_files.append(viz_file.name)
+                    print(f"Deleted visualization file: {viz_file.name}")
+            except Exception as e:
+                print(f"Failed to delete {viz_file.name}: {e}")
+        
+        self.generated_png_files.clear()
+        return deleted_files
+    
+    def validate_statistical_accuracy(self, cv_scores_dict):
+        """Validate statistical accuracy of saved data"""
+        print("Validating statistical accuracy of analysis data")
+        
+        validation_results = {
+            'cv_validation': True,
+            'performance_validation': True,
+            'data_consistency': True,
+            'issues': []
+        }
+        
+        try:
+            # Validate CV scores consistency
+            for model_name, scores in cv_scores_dict.items():
+                mean_score = scores.get('mean', 0)
+                std_score = scores.get('std', 0)
+                stability_score = scores.get('stability', 0)
+                
+                # Check if stability calculation is correct
+                expected_stability = mean_score - (0.8 * std_score)
+                if abs(stability_score - expected_stability) > 0.001:
+                    validation_results['cv_validation'] = False
+                    validation_results['issues'].append(f"Stability calculation incorrect for {model_name}")
+                
+                # Check reasonable ranges
+                if not (0 <= mean_score <= 1):
+                    validation_results['cv_validation'] = False
+                    validation_results['issues'].append(f"Mean score out of range for {model_name}: {mean_score}")
+                
+                if std_score < 0 or std_score > 0.5:
+                    validation_results['cv_validation'] = False
+                    validation_results['issues'].append(f"Standard deviation unusual for {model_name}: {std_score}")
+            
+            # Validate performance data consistency
+            for model_data in self.performance_data:
+                macro_f1 = model_data['macro_f1']
+                target_gap = model_data['target_gap']
+                
+                # Check target gap calculation
+                expected_gap = macro_f1 - 0.83
+                if abs(target_gap - expected_gap) > 0.001:
+                    validation_results['performance_validation'] = False
+                    validation_results['issues'].append(f"Target gap calculation incorrect for {model_data['model_name']}")
+                
+                # Check tier assignment consistency
+                tier = model_data['performance_tier']
+                if macro_f1 >= 0.80 and tier != "EXCELLENT":
+                    validation_results['performance_validation'] = False
+                    validation_results['issues'].append(f"Performance tier inconsistent for {model_data['model_name']}")
+                elif 0.75 <= macro_f1 < 0.80 and tier != "GOOD":
+                    validation_results['performance_validation'] = False
+                    validation_results['issues'].append(f"Performance tier inconsistent for {model_data['model_name']}")
+                elif 0.65 <= macro_f1 < 0.75 and tier != "FAIR":
+                    validation_results['performance_validation'] = False
+                    validation_results['issues'].append(f"Performance tier inconsistent for {model_data['model_name']}")
+                elif macro_f1 < 0.65 and tier != "POOR":
+                    validation_results['performance_validation'] = False
+                    validation_results['issues'].append(f"Performance tier inconsistent for {model_data['model_name']}")
+            
+            # Check data file existence and structure
+            expected_files = [
+                self.results_dir / "performance_summary.csv",
+                self.results_dir / "fault_detection_report.pdf"
+            ]
+            
+            for file_path in expected_files:
+                if not file_path.exists():
+                    validation_results['data_consistency'] = False
+                    validation_results['issues'].append(f"Missing expected file: {file_path.name}")
+            
+            # Validate CSV structure
+            csv_path = self.results_dir / "performance_summary.csv"
+            if csv_path.exists():
+                try:
+                    df = pd.read_csv(csv_path)
+                    required_columns = ['model_name', 'macro_f1', 'stability_score', 'target_gap', 'performance_tier']
+                    missing_columns = [col for col in required_columns if col not in df.columns]
+                    if missing_columns:
+                        validation_results['data_consistency'] = False
+                        validation_results['issues'].append(f"Missing columns in CSV: {missing_columns}")
+                except Exception as e:
+                    validation_results['data_consistency'] = False
+                    validation_results['issues'].append(f"Failed to read performance CSV: {e}")
+            
+            # Overall validation result
+            overall_valid = (validation_results['cv_validation'] and 
+                           validation_results['performance_validation'] and 
+                           validation_results['data_consistency'])
+            
+            if overall_valid:
+                print("Statistical validation PASSED - All data accurate and consistent")
+            else:
+                print("Statistical validation FAILED - Issues found:")
+                for issue in validation_results['issues']:
+                    print(f"  - {issue}")
+            
+            validation_results['overall_valid'] = overall_valid
+            return validation_results
+            
+        except Exception as e:
+            print(f"Statistical validation failed with error: {e}")
+            validation_results['overall_valid'] = False
+            validation_results['issues'].append(f"Validation error: {e}")
+            return validation_results
+    
     @timer
     def analyze_complete_system(self, cv_scores_dict, feature_importance_dict=None, 
                                class_metrics_dict=None, execution_times=None):
@@ -411,37 +577,52 @@ class ModelAnalyzer:
         print("Starting complete system analysis")
         
         try:
-            # 1. Create performance summary CSV
+            # 1. Validate statistical accuracy first
+            validation_results = self.validate_statistical_accuracy(cv_scores_dict)
+            
+            # 2. Create performance summary CSV
             self.create_performance_summary_csv(cv_scores_dict, execution_times)
             
-            # 2. Create model comparison chart
+            # 3. Create model comparison chart
             self.create_model_comparison_chart()
             
-            # 3. Create sensor importance chart
+            # 4. Create sensor importance chart
             if feature_importance_dict:
                 self.create_sensor_importance_chart(feature_importance_dict)
             
-            # 4. Create class performance chart
+            # 5. Create class performance chart
             if class_metrics_dict:
                 self.create_class_performance_chart(class_metrics_dict)
             
-            # 5. Create system analysis chart
+            # 6. Create system analysis chart
             if execution_times:
                 self.create_system_analysis_chart(execution_times)
             
-            # 6. Create comprehensive PDF report
+            # 7. Create comprehensive PDF report
             self.create_comprehensive_pdf_report()
             
-            # 7. Print console summary
+            # 8. Move analysis files from models to results
+            moved_files = self.move_analysis_files_to_results()
+            
+            # 9. Clean up PNG files after PDF creation
+            deleted_files = self.cleanup_png_files()
+            
+            # 10. Print console summary
             self._print_console_summary()
             
             print(f"\nAll analysis results saved in: {self.results_dir}")
-            print("Files generated:")
-            for file_path in self.results_dir.glob("*"):
+            print("Files moved to results:")
+            for file in moved_files:
+                print(f"  + {file}")
+            print("Temporary files cleaned:")
+            for file in deleted_files:
+                print(f"  - {file}")
+            print("Final files in results:")
+            for file_path in sorted(self.results_dir.glob("*")):
                 file_size = file_path.stat().st_size / 1024  # KB
                 print(f"  - {file_path.name} ({file_size:.1f} KB)")
             
-            return True
+            return validation_results['overall_valid']
             
         except Exception as e:
             print(f"Complete system analysis failed: {e}")
@@ -533,11 +714,13 @@ class ModelAnalyzer:
             execution_times = {model_name: 1.0}  # Placeholder
             
             # Generate all analysis
-            self.analyze_complete_system(
+            validation_passed = self.analyze_complete_system(
                 cv_scores_dict=cv_scores,
                 feature_importance_dict={model_name: importance_scores} if hasattr(model, 'feature_importances_') else None,
                 execution_times=execution_times
             )
+            
+            analysis_summary['validation_passed'] = validation_passed
             
             return analysis_summary
             
@@ -601,6 +784,7 @@ class ModelAnalyzer:
                 if fig is not None:
                     save_path = self.results_dir / f"{name}_visualization.png"
                     fig.savefig(save_path, dpi=300, bbox_inches='tight')
+                    self.generated_png_files.append(save_path)
                     print(f"Saved visualization: {save_path}")
             
         except Exception as e:
@@ -666,5 +850,6 @@ class ModelAnalyzer:
         self.analysis_results.clear()
         self.figures.clear()
         self.performance_data.clear()
+        self.generated_png_files.clear()
         gc.collect()
         print("Analysis data cleared")
