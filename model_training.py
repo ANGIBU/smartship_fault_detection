@@ -24,6 +24,9 @@ from optuna.pruners import MedianPruner, SuccessiveHalvingPruner
 from optuna.samplers import TPESampler
 import gc
 import warnings
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 warnings.filterwarnings('ignore')
 
 from config import Config
@@ -33,39 +36,168 @@ def macro_f1_score(y_true, y_pred):
     """Simple function for macro F1 scoring"""
     return f1_score(y_true, y_pred, average='macro', zero_division=0)
 
-class WeightCalculator:
-    """Class weight calculation with focal loss strategy"""
+class ClassBalancedLoss:
+    """Class-balanced loss implementation using effective number of samples"""
     
-    @staticmethod
-    def compute_focal_weights(y, alpha=2.0, gamma=3.0):
-        """Calculate Focal Loss based weights"""
-        class_counts = np.bincount(y, minlength=Config.N_CLASSES)
-        total_samples = len(y)
-        
-        # Frequency-based weights
-        freq_weights = total_samples / (Config.N_CLASSES * class_counts + 1e-8)
-        
-        # Apply focal weights with stronger penalty for minority classes
-        class_frequencies = class_counts / total_samples
-        focal_weights = alpha * np.power(1 - class_frequencies, gamma)
-        
-        # Combined weights
-        combined_weights = freq_weights * focal_weights
-        
-        # Apply square root to reduce extreme values
-        combined_weights = np.sqrt(combined_weights)
-        
-        # Normalize
-        combined_weights = combined_weights / np.mean(combined_weights)
-        
-        return dict(enumerate(combined_weights))
+    def __init__(self, samples_per_class, beta=0.9999, loss_type='focal'):
+        self.samples_per_class = samples_per_class
+        self.beta = beta
+        self.loss_type = loss_type
+        self.class_weights = self._calculate_weights()
     
-    @staticmethod
-    def compute_balanced_weights(y):
-        """Calculate balanced weights"""
-        classes = np.unique(y)
-        class_weights = compute_class_weight('balanced', classes=classes, y=y)
-        return dict(zip(classes, class_weights))
+    def _calculate_weights(self):
+        """Calculate class weights based on effective number of samples"""
+        effective_nums = [(1 - np.power(self.beta, n)) / (1 - self.beta) 
+                         for n in self.samples_per_class]
+        weights = [(1 - self.beta) / en for en in effective_nums]
+        normalized_weights = np.array(weights) / np.sum(weights) * len(weights)
+        return normalized_weights
+    
+    def focal_loss(self, y_true, y_pred, alpha=1.0, gamma=2.0):
+        """Focal loss implementation"""
+        ce_loss = F.cross_entropy(y_pred, y_true, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = alpha * (1 - pt) ** gamma * ce_loss
+        return focal_loss.mean()
+    
+    def get_weights_dict(self):
+        """Return weights as dictionary for sklearn compatibility"""
+        return {i: weight for i, weight in enumerate(self.class_weights)}
+
+class TemperatureScaling(nn.Module):
+    """Temperature scaling for model calibration"""
+    
+    def __init__(self, model=None):
+        super(TemperatureScaling, self).__init__()
+        self.model = model
+        self.temperature = nn.Parameter(torch.ones(1) * Config.TEMPERATURE_INIT)
+    
+    def temperature_scale(self, logits):
+        """Apply temperature scaling to logits"""
+        return logits / self.temperature
+    
+    def forward(self, logits):
+        """Forward pass with temperature scaling"""
+        return self.temperature_scale(logits)
+    
+    def calibrate(self, val_loader, criterion=nn.CrossEntropyLoss()):
+        """Calibrate temperature parameter"""
+        optimizer = torch.optim.LBFGS([self.temperature], lr=0.01, max_iter=50)
+        
+        def eval():
+            loss = 0
+            for logits, labels in val_loader:
+                logits = self.temperature_scale(logits)
+                loss += criterion(logits, labels)
+            loss.backward()
+            return loss
+        
+        optimizer.step(eval)
+        return self.temperature.item()
+
+class SelectiveEnsemble:
+    """Selective ensemble based on diversity and accuracy"""
+    
+    def __init__(self, diversity_threshold=0.15, accuracy_threshold=0.75):
+        self.diversity_threshold = diversity_threshold
+        self.accuracy_threshold = accuracy_threshold
+        self.selected_models = {}
+        self.weights = {}
+    
+    def calculate_diversity(self, predictions_dict):
+        """Calculate diversity between model predictions"""
+        models = list(predictions_dict.keys())
+        diversities = {}
+        
+        for i, model1 in enumerate(models):
+            for j, model2 in enumerate(models[i+1:], i+1):
+                pred1 = predictions_dict[model1]
+                pred2 = predictions_dict[model2]
+                
+                # Calculate disagreement rate
+                disagreement = np.mean(pred1 != pred2)
+                diversities[(model1, model2)] = disagreement
+        
+        return diversities
+    
+    def select_models(self, models_dict, X_val, y_val):
+        """Select models based on accuracy and diversity criteria"""
+        # Calculate individual model accuracies
+        accuracies = {}
+        predictions = {}
+        
+        for name, model in models_dict.items():
+            try:
+                pred = model.predict(X_val)
+                acc = f1_score(y_val, pred, average='macro', zero_division=0)
+                accuracies[name] = acc
+                predictions[name] = pred
+            except Exception as e:
+                print(f"Error evaluating {name}: {e}")
+                continue
+        
+        # Filter models by accuracy threshold
+        good_models = {name: acc for name, acc in accuracies.items() 
+                      if acc >= self.accuracy_threshold}
+        
+        if len(good_models) < 2:
+            print("Insufficient models meeting accuracy threshold")
+            return {}
+        
+        # Calculate diversities
+        diversities = self.calculate_diversity({name: predictions[name] 
+                                             for name in good_models.keys()})
+        
+        # Select diverse models using greedy approach
+        selected = [max(good_models.keys(), key=good_models.get)]  # Start with best model
+        
+        while len(selected) < min(5, len(good_models)):  # Max 5 models
+            best_candidate = None
+            best_diversity = 0
+            
+            for candidate in good_models.keys():
+                if candidate in selected:
+                    continue
+                
+                # Calculate average diversity with selected models
+                avg_diversity = np.mean([diversities.get((selected_model, candidate), 
+                                                       diversities.get((candidate, selected_model), 0))
+                                       for selected_model in selected])
+                
+                if avg_diversity > best_diversity and avg_diversity > self.diversity_threshold:
+                    best_diversity = avg_diversity
+                    best_candidate = candidate
+            
+            if best_candidate is None:
+                break
+            
+            selected.append(best_candidate)
+        
+        # Calculate weights based on accuracy and diversity
+        self.selected_models = {name: models_dict[name] for name in selected}
+        
+        # Weight calculation: higher accuracy and diversity get more weight
+        total_weight = 0
+        self.weights = {}
+        
+        for name in selected:
+            acc_weight = good_models[name]
+            diversity_weight = np.mean([diversities.get((name, other), 
+                                                      diversities.get((other, name), 0))
+                                      for other in selected if other != name])
+            
+            combined_weight = acc_weight * (1 + diversity_weight)
+            self.weights[name] = combined_weight
+            total_weight += combined_weight
+        
+        # Normalize weights
+        self.weights = {name: weight/total_weight for name, weight in self.weights.items()}
+        
+        print(f"Selected {len(selected)} models for ensemble:")
+        for name in selected:
+            print(f"  {name}: accuracy {good_models[name]:.4f}, weight {self.weights[name]:.4f}")
+        
+        return self.selected_models
 
 class ModelTraining:
     def __init__(self):
@@ -75,42 +207,53 @@ class ModelTraining:
         self.cv_scores = {}
         self.ensemble_models = {}
         self.logger = setup_logging()
-        self.weight_calculator = WeightCalculator()
         self.calibrated_models = {}
+        self.class_balanced_loss = None
+        self.temperature_scaling = {}
+        self.selective_ensemble = None
         
     def _create_cv_strategy(self, X, y):
-        """Create Stratified K-Fold cross-validation strategy with better stratification"""
+        """Create Stratified K-Fold cross-validation strategy"""
         return StratifiedKFold(
             n_splits=Config.CV_FOLDS, 
             shuffle=True, 
             random_state=Config.RANDOM_STATE
         )
     
-    def _calculate_class_weights(self, y, method='focal'):
-        """Calculate class weights using focal loss strategy"""
-        if method == 'focal':
-            class_weight_dict = self.weight_calculator.compute_focal_weights(
-                y, Config.FOCAL_LOSS_ALPHA, Config.FOCAL_LOSS_GAMMA
-            )
-        else:
-            class_weight_dict = self.weight_calculator.compute_balanced_weights(y)
+    def _setup_class_balanced_loss(self, y_train):
+        """Setup class-balanced loss"""
+        if not Config.USE_CLASS_BALANCED_LOSS:
+            return None
         
-        sample_weights = np.array([class_weight_dict.get(label, 1.0) for label in y])
-        return sample_weights, class_weight_dict
+        samples_per_class = []
+        for class_id in range(Config.N_CLASSES):
+            count = np.sum(y_train == class_id)
+            samples_per_class.append(count)
+        
+        self.class_balanced_loss = ClassBalancedLoss(
+            samples_per_class, 
+            beta=Config.EFFECTIVE_NUMBER_BETA
+        )
+        
+        return self.class_balanced_loss.get_weights_dict()
     
     @timer
-    def train_lightgbm(self, X_train, y_train, X_val=None, y_val=None, params=None):
-        """Train LightGBM model with stability improvements"""
-        print("Starting LightGBM model training")
+    def train_lightgbm(self, X_train, y_train, X_val=None, y_val=None, params=None, sample_weights=None):
+        """Train LightGBM model with class-balanced loss"""
+        print("Starting LightGBM model training with class balancing")
         
         if params is None:
             params = Config.LGBM_PARAMS.copy()
         
         try:
-            sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'focal')
-            
-            # Apply class weights to parameters
-            params['class_weight'] = class_weight_dict
+            # Setup class weights
+            if Config.USE_CLASS_BALANCED_LOSS and sample_weights is not None:
+                # Use sample weights directly
+                pass
+            else:
+                class_weight_dict = self._setup_class_balanced_loss(y_train)
+                if class_weight_dict:
+                    params['class_weight'] = class_weight_dict
             
             # Add stability parameters
             params['force_col_wise'] = True
@@ -143,26 +286,23 @@ class ModelTraining:
             return None
     
     @timer
-    def train_quick_lightgbm(self, X_train, y_train):
+    def train_quick_lightgbm(self, X_train, y_train, sample_weights=None):
         """Train LightGBM model for quick mode"""
         print("Starting quick LightGBM model training")
         
         try:
             params = Config.get_model_params('quick_lightgbm')
             
-            # Simple balanced weights for quick mode
-            if Config.USE_CLASS_WEIGHTS:
-                sample_weights, class_weight_dict = self._calculate_class_weights(y_train, method='balanced')
-                params['class_weight'] = class_weight_dict
+            # Simple class weights for quick mode
+            if Config.USE_CLASS_BALANCED_LOSS and sample_weights is not None:
+                pass
             else:
-                sample_weights = None
+                class_weight_dict = self._setup_class_balanced_loss(y_train)
+                if class_weight_dict:
+                    params['class_weight'] = class_weight_dict
             
             model = lgb.LGBMClassifier(**params)
-            
-            if sample_weights is not None:
-                model.fit(X_train, y_train, sample_weight=sample_weights)
-            else:
-                model.fit(X_train, y_train)
+            model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['quick_lightgbm'] = model
             self.best_model = model
@@ -175,16 +315,15 @@ class ModelTraining:
             return None
     
     @timer
-    def train_xgboost(self, X_train, y_train, X_val=None, y_val=None, params=None):
-        """Train XGBoost model with focal weights"""
-        print("Starting XGBoost model training")
+    def train_xgboost(self, X_train, y_train, X_val=None, y_val=None, params=None, sample_weights=None):
+        """Train XGBoost model with class-balanced loss"""
+        print("Starting XGBoost model training with class balancing")
         
         if params is None:
             params = Config.XGB_PARAMS.copy()
         
         try:
-            sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'focal')
-            
+            # Setup class weights using sample_weight parameter
             model = xgb.XGBClassifier(**params)
             
             if X_val is not None and y_val is not None:
@@ -207,20 +346,18 @@ class ModelTraining:
             return None
     
     @timer
-    def train_catboost(self, X_train, y_train, X_val=None, y_val=None, params=None):
-        """Train CatBoost model with focal weights"""
+    def train_catboost(self, X_train, y_train, X_val=None, y_val=None, params=None, sample_weights=None):
+        """Train CatBoost model with class-balanced loss"""
         if not CATBOOST_AVAILABLE:
             print("CatBoost library not available, skipping training")
             return None
             
-        print("Starting CatBoost model training")
+        print("Starting CatBoost model training with class balancing")
         
         if params is None:
             params = Config.CAT_PARAMS.copy()
         
         try:
-            sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'focal')
-            
             model = cb.CatBoostClassifier(**params)
             
             if X_val is not None and y_val is not None:
@@ -244,20 +381,21 @@ class ModelTraining:
             return None
     
     @timer
-    def train_random_forest(self, X_train, y_train, params=None):
-        """Train Random Forest model with focal weights"""
-        print("Starting Random Forest model training")
+    def train_random_forest(self, X_train, y_train, params=None, sample_weights=None):
+        """Train Random Forest model with class-balanced loss"""
+        print("Starting Random Forest model training with class balancing")
         
         if params is None:
             params = Config.RF_PARAMS.copy()
         
         try:
-            sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'focal')
+            # Use class weights in the model parameters
+            class_weight_dict = self._setup_class_balanced_loss(y_train)
+            if class_weight_dict:
+                params['class_weight'] = class_weight_dict
             
-            # Use class_weight parameter instead of sample_weight for Random Forest
-            params['class_weight'] = class_weight_dict
             model = RandomForestClassifier(**params)
-            model.fit(X_train, y_train)
+            model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['random_forest'] = model
             self.logger.info("Random Forest model training completed")
@@ -269,19 +407,20 @@ class ModelTraining:
             return None
     
     @timer
-    def train_extra_trees(self, X_train, y_train, params=None):
-        """Train Extra Trees model with focal weights"""
-        print("Starting Extra Trees model training")
+    def train_extra_trees(self, X_train, y_train, params=None, sample_weights=None):
+        """Train Extra Trees model with class-balanced loss"""
+        print("Starting Extra Trees model training with class balancing")
         
         try:
             if params is None:
                 params = Config.ET_PARAMS.copy()
             
-            sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'focal')
+            class_weight_dict = self._setup_class_balanced_loss(y_train)
+            if class_weight_dict:
+                params['class_weight'] = class_weight_dict
             
-            params['class_weight'] = class_weight_dict
             model = ExtraTreesClassifier(**params)
-            model.fit(X_train, y_train)
+            model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['extra_trees'] = model
             self.logger.info("Extra Trees model training completed")
@@ -293,15 +432,13 @@ class ModelTraining:
             return None
     
     @timer
-    def train_gradient_boosting(self, X_train, y_train, params=None):
-        """Train Gradient Boosting model with focal weights"""
-        print("Starting Gradient Boosting model training")
+    def train_gradient_boosting(self, X_train, y_train, params=None, sample_weights=None):
+        """Train Gradient Boosting model with class-balanced loss"""
+        print("Starting Gradient Boosting model training with class balancing")
         
         try:
             if params is None:
                 params = Config.GB_PARAMS.copy()
-            
-            sample_weights, _ = self._calculate_class_weights(y_train, 'focal')
             
             model = GradientBoostingClassifier(**params)
             model.fit(X_train, y_train, sample_weight=sample_weights)
@@ -316,16 +453,16 @@ class ModelTraining:
             return None
     
     @timer
-    def train_neural_network(self, X_train, y_train, params=None):
-        """Train Neural Network model"""
-        print("Starting Neural Network model training")
+    def train_neural_network(self, X_train, y_train, params=None, sample_weights=None):
+        """Train Neural Network model with class balancing"""
+        print("Starting Neural Network model training with class balancing")
         
         try:
             if params is None:
                 params = Config.NN_PARAMS.copy()
             
             model = MLPClassifier(**params)
-            model.fit(X_train, y_train)
+            model.fit(X_train, y_train, sample_weight=sample_weights)
             
             self.models['neural_network'] = model
             self.logger.info("Neural Network model training completed")
@@ -337,9 +474,58 @@ class ModelTraining:
             return None
     
     @timer
-    def hyperparameter_optimization(self, X_train, y_train, model_type='lightgbm', n_trials=50):
+    def apply_temperature_scaling(self, model, model_name, X_val, y_val):
+        """Apply temperature scaling to model for calibration"""
+        if not Config.USE_TEMPERATURE_SCALING:
+            return model
+        
+        print(f"Applying temperature scaling to {model_name}")
+        
+        try:
+            # Get model predictions as logits/probabilities
+            if hasattr(model, 'predict_proba'):
+                val_probs = model.predict_proba(X_val)
+                val_logits = torch.tensor(np.log(val_probs + 1e-8), dtype=torch.float32)
+            elif hasattr(model, 'decision_function'):
+                val_scores = model.decision_function(X_val)
+                val_logits = torch.tensor(val_scores, dtype=torch.float32)
+            else:
+                print(f"Model {model_name} doesn't support probability prediction")
+                return model
+            
+            val_labels = torch.tensor(y_val.values, dtype=torch.long)
+            
+            # Create temperature scaling module
+            temp_scaling = TemperatureScaling()
+            
+            # Simple temperature optimization
+            criterion = nn.CrossEntropyLoss()
+            optimizer = torch.optim.LBFGS([temp_scaling.temperature], lr=0.01, max_iter=50)
+            
+            def closure():
+                optimizer.zero_grad()
+                scaled_logits = temp_scaling(val_logits)
+                loss = criterion(scaled_logits, val_labels)
+                loss.backward()
+                return loss
+            
+            optimizer.step(closure)
+            
+            final_temperature = temp_scaling.temperature.item()
+            self.temperature_scaling[model_name] = final_temperature
+            
+            print(f"Temperature scaling for {model_name}: T = {final_temperature:.3f}")
+            
+            return model
+            
+        except Exception as e:
+            print(f"Temperature scaling failed for {model_name}: {e}")
+            return model
+    
+    @timer
+    def hyperparameter_optimization(self, X_train, y_train, model_type='lightgbm', n_trials=50, sample_weights=None):
         """Hyperparameter tuning with Optuna"""
-        print(f"Starting {model_type} hyperparameter tuning")
+        print(f"Starting {model_type} hyperparameter tuning with class balancing")
         
         tuning_space = Config.get_tuning_space(model_type)
         if not tuning_space:
@@ -358,7 +544,8 @@ class ModelTraining:
                         'random_state': Config.RANDOM_STATE,
                         'n_jobs': 1,
                         'force_col_wise': True,
-                        'deterministic': True
+                        'deterministic': True,
+                        'is_unbalance': True
                     }
                     
                     for param, (min_val, max_val) in tuning_space.items():
@@ -369,8 +556,6 @@ class ModelTraining:
                         else:
                             params[param] = trial.suggest_float(param, min_val, max_val)
                     
-                    sample_weights, class_weight_dict = self._calculate_class_weights(y_train, 'focal')
-                    params['class_weight'] = class_weight_dict
                     model = lgb.LGBMClassifier(**params)
                     
                 elif model_type == 'xgboost':
@@ -392,7 +577,6 @@ class ModelTraining:
                         else:
                             params[param] = trial.suggest_float(param, min_val, max_val)
                     
-                    sample_weights, _ = self._calculate_class_weights(y_train, 'focal')
                     model = xgb.XGBClassifier(**params)
                 
                 elif model_type == 'catboost' and CATBOOST_AVAILABLE:
@@ -414,10 +598,9 @@ class ModelTraining:
                         else:
                             params[param] = trial.suggest_float(param, min_val, max_val)
                     
-                    sample_weights, _ = self._calculate_class_weights(y_train, 'focal')
                     model = cb.CatBoostClassifier(**params)
                 
-                # Stratified K-Fold cross-validation
+                # Stratified K-Fold cross-validation with sample weights
                 cv_strategy = self._create_cv_strategy(X_train, y_train)
                 cv_scores = []
                 
@@ -425,11 +608,12 @@ class ModelTraining:
                     X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
                     y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
                     
+                    # Apply sample weights if available
+                    sw_tr = sample_weights[train_idx] if sample_weights is not None else None
+                    
                     if model_type in ['lightgbm', 'xgboost']:
-                        sw_tr, _ = self._calculate_class_weights(y_tr, 'focal')
                         model.fit(X_tr, y_tr, sample_weight=sw_tr)
                     elif model_type == 'catboost':
-                        sw_tr, _ = self._calculate_class_weights(y_tr, 'focal')
                         model.fit(X_tr, y_tr, sample_weight=sw_tr, verbose=False)
                     else:
                         model.fit(X_tr, y_tr)
@@ -439,7 +623,7 @@ class ModelTraining:
                     cv_scores.append(score)
                     
                     # Early stopping if performance is poor
-                    if fold_idx >= 2 and np.mean(cv_scores) < 0.60:
+                    if fold_idx >= 2 and np.mean(cv_scores) < 0.65:
                         break
                     
                     # Pruning based on intermediate results
@@ -468,9 +652,9 @@ class ModelTraining:
         return study.best_params, study.best_value
     
     @timer
-    def cross_validate_models(self, X_train, y_train):
-        """Perform model cross-validation with stability calculation"""
-        print("Starting model cross-validation")
+    def cross_validate_models(self, X_train, y_train, sample_weights=None):
+        """Perform model cross-validation with class balancing"""
+        print("Starting model cross-validation with class balancing")
         
         cv_strategy = StratifiedKFold(
             n_splits=Config.CV_FOLDS, 
@@ -486,13 +670,31 @@ class ModelTraining:
             print(f"Cross-validating {model_name}")
             
             try:
-                cv_scores = cross_val_score(
-                    model, X_train, y_train,
-                    cv=cv_strategy,
-                    scoring=make_scorer(macro_f1_score),
-                    n_jobs=1
-                )
+                # Custom cross-validation to handle sample weights
+                cv_scores = []
                 
+                for train_idx, val_idx in cv_strategy.split(X_train, y_train):
+                    X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
+                    y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
+                    
+                    # Clone model for this fold
+                    from sklearn.base import clone
+                    fold_model = clone(model)
+                    
+                    # Apply sample weights if available
+                    sw_tr = sample_weights[train_idx] if sample_weights is not None else None
+                    
+                    # Train and evaluate
+                    if hasattr(fold_model, 'fit') and 'sample_weight' in fold_model.fit.__code__.co_varnames:
+                        fold_model.fit(X_tr, y_tr, sample_weight=sw_tr)
+                    else:
+                        fold_model.fit(X_tr, y_tr)
+                    
+                    y_pred = fold_model.predict(X_val)
+                    score = macro_f1_score(y_val, y_pred)
+                    cv_scores.append(score)
+                
+                cv_scores = np.array(cv_scores)
                 mean_score = cv_scores.mean()
                 std_score = cv_scores.std()
                 
@@ -527,88 +729,93 @@ class ModelTraining:
         return self.cv_scores
     
     @timer
-    def create_ensemble(self, X_train, y_train, X_val=None, y_val=None):
-        """Create ensemble model with diversity consideration"""
-        print("Starting ensemble model creation")
+    def create_selective_ensemble(self, X_train, y_train, X_val=None, y_val=None):
+        """Create selective ensemble model with diversity consideration"""
+        print("Starting selective ensemble model creation")
+        
+        if not Config.USE_SELECTIVE_ENSEMBLE:
+            print("Selective ensemble disabled")
+            return None
         
         if not self.cv_scores:
             print("No CV scores available for ensemble creation")
             return None
         
-        # Select top performing models with diversity
-        sorted_models = sorted(self.cv_scores.items(), key=lambda x: x[1]['stability'], reverse=True)
-        top_models = sorted_models[:5]  # Top 5 models
+        # Use validation set or create one
+        if X_val is None or y_val is None:
+            from sklearn.model_selection import train_test_split
+            X_val, _, y_val, _ = train_test_split(
+                X_train, y_train, test_size=0.2, 
+                random_state=Config.RANDOM_STATE, stratify=y_train
+            )
         
-        good_models = []
-        min_score = 0.70  # Minimum threshold
+        # Initialize selective ensemble
+        self.selective_ensemble = SelectiveEnsemble(
+            diversity_threshold=Config.ENSEMBLE_DIVERSITY_THRESHOLD,
+            accuracy_threshold=Config.ENSEMBLE_ACCURACY_THRESHOLD
+        )
         
-        for name, scores in top_models:
-            if name in self.models and self.models[name] is not None and scores['stability'] >= min_score:
-                score = scores['stability']
-                good_models.append((name, self.models[name], score))
-                print(f"{name}: stability score {score:.4f}")
+        # Select models based on diversity and accuracy
+        selected_models = self.selective_ensemble.select_models(self.models, X_val, y_val)
         
-        if len(good_models) >= 2:
-            print(f"Models for ensemble: {[name for name, _, _ in good_models]}")
+        if len(selected_models) >= 2:
+            print(f"Created selective ensemble with {len(selected_models)} models")
             
             try:
-                # Weighted Voting Classifier with stability-based weights
-                stability_weights = []
-                total_weight = 0
-                
-                for _, _, score in good_models:
-                    # Use exponential weighting to emphasize better models
-                    weight = np.exp(score * 3)  # Stability-based weighting
-                    stability_weights.append(weight)
-                    total_weight += weight
-                
-                # Normalize weights
-                stability_weights = [w / total_weight for w in stability_weights]
-                
-                # Create VotingClassifier
-                estimators = [(name, model) for name, model, _ in good_models]
+                # Create voting ensemble with selected models and weights
+                estimators = [(name, model) for name, model in selected_models.items()]
+                weights = [self.selective_ensemble.weights[name] for name, _ in estimators]
                 
                 voting_ensemble = VotingClassifier(
                     estimators=estimators,
                     voting='soft',
-                    weights=stability_weights
+                    weights=weights
                 )
                 
                 # Train ensemble
-                sample_weights, _ = self._calculate_class_weights(y_train, 'focal')
-                voting_ensemble.fit(X_train, y_train, sample_weight=sample_weights)
+                voting_ensemble.fit(X_train, y_train)
                 
-                self.models['voting_ensemble'] = voting_ensemble
-                self.ensemble_models['voting'] = voting_ensemble
+                self.models['selective_ensemble'] = voting_ensemble
+                self.ensemble_models['selective'] = voting_ensemble
                 
-                print("Voting ensemble creation completed")
-                print(f"Voting weights: {dict(zip([name for name, _, _ in good_models], stability_weights))}")
-                
+                print("Selective ensemble creation completed")
                 return voting_ensemble
                 
             except Exception as e:
-                print(f"Ensemble creation failed: {e}")
+                print(f"Selective ensemble creation failed: {e}")
                 return None
         else:
-            print("Insufficient models for ensemble")
+            print("Insufficient models for selective ensemble")
             return None
     
     @timer
     def calibrate_models(self, X_train, y_train):
-        """Calibrate model probabilities"""
+        """Calibrate model probabilities with temperature scaling"""
         print("Starting model probability calibration")
+        
+        # Create calibration validation set
+        from sklearn.model_selection import train_test_split
+        X_cal_train, X_cal_val, y_cal_train, y_cal_val = train_test_split(
+            X_train, y_train, test_size=0.2, random_state=Config.RANDOM_STATE, stratify=y_train
+        )
         
         for model_name, model in self.models.items():
             if model is None or 'ensemble' in model_name:
                 continue
                 
             try:
-                calibrated_model = CalibratedClassifierCV(
-                    model, method='isotonic', cv=3
+                # Apply temperature scaling
+                calibrated_model = self.apply_temperature_scaling(
+                    model, model_name, X_cal_val, y_cal_val
                 )
-                calibrated_model.fit(X_train, y_train)
                 
-                self.calibrated_models[f'{model_name}_calibrated'] = calibrated_model
+                # Traditional Platt scaling as backup
+                platt_calibrated = CalibratedClassifierCV(
+                    model, method='sigmoid', cv=3
+                )
+                platt_calibrated.fit(X_cal_train, y_cal_train)
+                
+                self.calibrated_models[f'{model_name}_calibrated'] = platt_calibrated
                 print(f"Calibrated {model_name}")
                 
             except Exception as e:
@@ -617,9 +824,13 @@ class ModelTraining:
         print(f"Calibrated {len(self.calibrated_models)} models")
     
     @timer
-    def train_all_models(self, X_train, y_train, X_val=None, y_val=None, use_optimization=True):
-        """Train all models with strategy"""
-        print("Starting comprehensive model training")
+    def train_all_models(self, X_train, y_train, X_val=None, y_val=None, use_optimization=True, sample_weights=None):
+        """Train all models with class balancing strategy"""
+        print("Starting comprehensive model training with class balancing")
+        
+        # Setup class-balanced loss if needed
+        if Config.USE_CLASS_BALANCED_LOSS:
+            print("Using class-balanced loss approach")
         
         # Train basic tree-based models
         if use_optimization:
@@ -628,66 +839,66 @@ class ModelTraining:
             # LightGBM tuning
             try:
                 best_params, best_score = self.hyperparameter_optimization(
-                    X_train, y_train, 'lightgbm', n_trials=Config.OPTUNA_TRIALS
+                    X_train, y_train, 'lightgbm', n_trials=Config.OPTUNA_TRIALS, sample_weights=sample_weights
                 )
-                if best_score > 0.65:
-                    self.train_lightgbm(X_train, y_train, X_val, y_val, best_params)
+                if best_score > 0.70:
+                    self.train_lightgbm(X_train, y_train, X_val, y_val, best_params, sample_weights)
                 else:
-                    self.train_lightgbm(X_train, y_train, X_val, y_val)
+                    self.train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=sample_weights)
             except Exception as e:
                 print(f"LightGBM tuning failed: {e}")
-                self.train_lightgbm(X_train, y_train, X_val, y_val)
+                self.train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=sample_weights)
             
             # XGBoost tuning
             try:
                 best_params, best_score = self.hyperparameter_optimization(
-                    X_train, y_train, 'xgboost', n_trials=Config.OPTUNA_TRIALS
+                    X_train, y_train, 'xgboost', n_trials=Config.OPTUNA_TRIALS, sample_weights=sample_weights
                 )
-                if best_score > 0.65:
-                    self.train_xgboost(X_train, y_train, X_val, y_val, best_params)
+                if best_score > 0.70:
+                    self.train_xgboost(X_train, y_train, X_val, y_val, best_params, sample_weights)
                 else:
-                    self.train_xgboost(X_train, y_train, X_val, y_val)
+                    self.train_xgboost(X_train, y_train, X_val, y_val, sample_weights=sample_weights)
             except Exception as e:
                 print(f"XGBoost tuning failed: {e}")
-                self.train_xgboost(X_train, y_train, X_val, y_val)
+                self.train_xgboost(X_train, y_train, X_val, y_val, sample_weights=sample_weights)
             
             # CatBoost tuning
             if CATBOOST_AVAILABLE:
                 try:
                     best_params, best_score = self.hyperparameter_optimization(
-                        X_train, y_train, 'catboost', n_trials=Config.OPTUNA_TRIALS
+                        X_train, y_train, 'catboost', n_trials=Config.OPTUNA_TRIALS, sample_weights=sample_weights
                     )
-                    if best_score > 0.65:
-                        self.train_catboost(X_train, y_train, X_val, y_val, best_params)
+                    if best_score > 0.70:
+                        self.train_catboost(X_train, y_train, X_val, y_val, best_params, sample_weights)
                     else:
-                        self.train_catboost(X_train, y_train, X_val, y_val)
+                        self.train_catboost(X_train, y_train, X_val, y_val, sample_weights=sample_weights)
                 except Exception as e:
                     print(f"CatBoost tuning failed: {e}")
-                    self.train_catboost(X_train, y_train, X_val, y_val)
+                    self.train_catboost(X_train, y_train, X_val, y_val, sample_weights=sample_weights)
         else:
-            self.train_lightgbm(X_train, y_train, X_val, y_val)
-            self.train_xgboost(X_train, y_train, X_val, y_val)
+            self.train_lightgbm(X_train, y_train, X_val, y_val, sample_weights=sample_weights)
+            self.train_xgboost(X_train, y_train, X_val, y_val, sample_weights=sample_weights)
             if CATBOOST_AVAILABLE:
-                self.train_catboost(X_train, y_train, X_val, y_val)
+                self.train_catboost(X_train, y_train, X_val, y_val, sample_weights=sample_weights)
         
         # Train additional models for diversity
-        self.train_random_forest(X_train, y_train)
-        self.train_extra_trees(X_train, y_train)
-        self.train_gradient_boosting(X_train, y_train)
+        self.train_random_forest(X_train, y_train, sample_weights=sample_weights)
+        self.train_extra_trees(X_train, y_train, sample_weights=sample_weights)
+        self.train_gradient_boosting(X_train, y_train, sample_weights=sample_weights)
         
         # Train neural network if data size is sufficient
         if len(X_train) > 8000:
-            self.train_neural_network(X_train, y_train)
+            self.train_neural_network(X_train, y_train, sample_weights=sample_weights)
         
         # Remove None models
         self.models = {k: v for k, v in self.models.items() if v is not None}
         
-        # Cross-validation
+        # Cross-validation with class balancing
         if self.models:
-            self.cross_validate_models(X_train, y_train)
+            self.cross_validate_models(X_train, y_train, sample_weights)
             
-            # Create ensemble
-            ensemble = self.create_ensemble(X_train, y_train, X_val, y_val)
+            # Create selective ensemble
+            ensemble = self.create_selective_ensemble(X_train, y_train, X_val, y_val)
             
             # Validate ensemble performance
             if ensemble is not None:
@@ -698,35 +909,36 @@ class ModelTraining:
                         random_state=Config.RANDOM_STATE
                     )
                     
-                    # Validate voting ensemble
-                    if 'voting_ensemble' in self.models:
-                        ensemble_model = self.models['voting_ensemble']
+                    # Custom CV for ensemble with sample weights
+                    ensemble_cv = []
+                    for train_idx, val_idx in cv_strategy.split(X_train, y_train):
+                        X_tr, X_val_fold = X_train.iloc[train_idx], X_train.iloc[val_idx]
+                        y_tr, y_val_fold = y_train.iloc[train_idx], y_train.iloc[val_idx]
                         
-                        ensemble_cv = cross_val_score(
-                            ensemble_model, X_train, y_train,
-                            cv=cv_strategy,
-                            scoring=make_scorer(macro_f1_score),
-                            n_jobs=1
-                        )
-                        
-                        ensemble_score = ensemble_cv.mean()
-                        ensemble_std = ensemble_cv.std()
-                        stability_score = ensemble_score - (0.8 * ensemble_std)
-                        
-                        self.cv_scores['voting_ensemble'] = {
-                            'scores': ensemble_cv,
-                            'mean': ensemble_score,
-                            'std': ensemble_std,
-                            'stability': stability_score
-                        }
-                        
-                        print(f"voting_ensemble stability score: {stability_score:.4f}")
-                        
-                        # Update best model if ensemble is better
-                        if stability_score > self.best_score:
-                            self.best_model = ensemble_model
-                            self.best_score = stability_score
-                            print(f"voting_ensemble selected as best model")
+                        ensemble.fit(X_tr, y_tr)
+                        y_pred = ensemble.predict(X_val_fold)
+                        score = macro_f1_score(y_val_fold, y_pred)
+                        ensemble_cv.append(score)
+                    
+                    ensemble_cv = np.array(ensemble_cv)
+                    ensemble_score = ensemble_cv.mean()
+                    ensemble_std = ensemble_cv.std()
+                    stability_score = ensemble_score - (0.8 * ensemble_std)
+                    
+                    self.cv_scores['selective_ensemble'] = {
+                        'scores': ensemble_cv,
+                        'mean': ensemble_score,
+                        'std': ensemble_std,
+                        'stability': stability_score
+                    }
+                    
+                    print(f"selective_ensemble stability score: {stability_score:.4f}")
+                    
+                    # Update best model if ensemble is better
+                    if stability_score > self.best_score:
+                        self.best_model = ensemble
+                        self.best_score = stability_score
+                        print(f"selective_ensemble selected as best model")
                     
                 except Exception as e:
                     print(f"Ensemble validation failed: {e}")
@@ -792,6 +1004,14 @@ class ModelTraining:
         
         return importance_dict
     
+    def get_class_balanced_loss(self):
+        """Return class balanced loss object"""
+        return self.class_balanced_loss
+    
+    def get_temperature_scaling(self):
+        """Return temperature scaling parameters"""
+        return self.temperature_scaling
+    
     def get_best_single_model(self):
         """Get best performing single model (non-ensemble)"""
         if not self.cv_scores:
@@ -804,18 +1024,3 @@ class ModelTraining:
         
         best_model_name = max(single_model_scores.keys(), key=lambda x: single_model_scores[x]['stability'])
         return self.models.get(best_model_name)
-    
-    def get_ensemble_performance_summary(self):
-        """Get performance summary of all ensemble methods"""
-        ensemble_summary = {}
-        
-        for ensemble_name in ['voting_ensemble', 'stacking_ensemble', 'dynamic_ensemble']:
-            if ensemble_name in self.cv_scores:
-                scores = self.cv_scores[ensemble_name]
-                ensemble_summary[ensemble_name] = {
-                    'mean_f1': scores['mean'],
-                    'stability': scores['stability'],
-                    'std': scores['std']
-                }
-        
-        return ensemble_summary

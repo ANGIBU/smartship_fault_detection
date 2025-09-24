@@ -39,18 +39,31 @@ class Config:
     
     # Feature selection settings
     FEATURE_SELECTION_METHODS = ['mutual_info', 'f_classif', 'recursive']
-    TARGET_FEATURES = 35
+    TARGET_FEATURES = 38
     
-    # Class weight settings
-    USE_CLASS_WEIGHTS = True
+    # Class balance settings
+    USE_CLASS_BALANCED_LOSS = True
+    EFFECTIVE_NUMBER_BETA = 0.9999
     FOCAL_LOSS_ALPHA = 2.0
     FOCAL_LOSS_GAMMA = 3.0
+    ISOLATION_FOREST_CONTAMINATION = 0.1
+    
+    # Temperature scaling settings
+    USE_TEMPERATURE_SCALING = True
+    TEMPERATURE_INIT = 1.5
+    CALIBRATION_EPOCHS = 50
     
     # Quick mode settings
     QUICK_MODE = False
     QUICK_SAMPLE_SIZE = 1000
     QUICK_FEATURE_COUNT = 15
     QUICK_N_ESTIMATORS = 50
+    
+    # Memory optimization settings
+    MEMORY_EFFICIENT = True
+    CHUNK_SIZE = 5000
+    USE_STREAMING = True
+    DTYPE_OPTIMIZATION = True
     
     # LightGBM parameters
     LGBM_PARAMS = {
@@ -73,14 +86,14 @@ class Config:
         'random_state': RANDOM_STATE,
         'n_estimators': 1200,
         'n_jobs': N_JOBS,
-        'class_weight': 'balanced',
         'subsample': 0.88,
         'colsample_bytree': 0.82,
         'min_data_in_leaf': 12,
         'lambda_l1': 0.05,
         'lambda_l2': 0.12,
         'extra_trees': False,
-        'max_bin': 255
+        'max_bin': 255,
+        'is_unbalance': True
     }
     
     # Quick LightGBM parameters
@@ -100,7 +113,7 @@ class Config:
         'random_state': RANDOM_STATE,
         'n_estimators': QUICK_N_ESTIMATORS,
         'n_jobs': 1,
-        'class_weight': 'balanced'
+        'is_unbalance': True
     }
     
     # XGBoost parameters
@@ -186,6 +199,18 @@ class Config:
         'min_impurity_decrease': 0.0
     }
     
+    # Isolation Forest parameters for each class
+    ISOLATION_FOREST_PARAMS = {
+        'n_estimators': 200,
+        'contamination': ISOLATION_FOREST_CONTAMINATION,
+        'random_state': RANDOM_STATE,
+        'n_jobs': N_JOBS,
+        'max_samples': 'auto',
+        'max_features': 1.0,
+        'bootstrap': False,
+        'warm_start': False
+    }
+    
     # Hyperparameter tuning settings
     OPTUNA_TRIALS = 50
     OPTUNA_TIMEOUT = 3600
@@ -199,43 +224,53 @@ class Config:
         'random_forest': 0.05
     }
     
+    # Selective ensemble settings
+    USE_SELECTIVE_ENSEMBLE = True
+    ENSEMBLE_DIVERSITY_THRESHOLD = 0.15
+    ENSEMBLE_ACCURACY_THRESHOLD = 0.75
+    
     # Logging settings
     LOG_LEVEL = 'INFO'
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     
-    # Memory settings
-    MEMORY_EFFICIENT = True
-    CHUNK_SIZE = 10000
-    
-    # Validation strategy settings
-    VALIDATION_STRATEGY = 'stratified'
-    
-    # Class performance threshold
-    CLASS_PERFORMANCE_THRESHOLD = 0.65
-    
     # Scaling method
-    SCALING_METHOD = 'standard'
+    SCALING_METHOD = 'sensor_specific'
+    
+    # Sensor-specific settings
+    SENSOR_TYPES = {
+        'temperature': ['X_01', 'X_02', 'X_03', 'X_04', 'X_05'],
+        'pressure': ['X_06', 'X_07', 'X_08', 'X_09', 'X_10'],
+        'vibration': ['X_11', 'X_12', 'X_13', 'X_14', 'X_15'],
+        'flow': ['X_16', 'X_17', 'X_18', 'X_19', 'X_20'],
+        'electrical': ['X_21', 'X_22', 'X_23', 'X_24', 'X_25'],
+        'mechanical': ['X_26', 'X_27', 'X_28', 'X_29', 'X_30'],
+        'chemical': ['X_31', 'X_32', 'X_33', 'X_34', 'X_35'],
+        'thermal': ['X_36', 'X_37', 'X_38', 'X_39', 'X_40'],
+        'optical': ['X_41', 'X_42', 'X_43', 'X_44', 'X_45'],
+        'acoustic': ['X_46', 'X_47', 'X_48', 'X_49', 'X_50'],
+        'other': ['X_51', 'X_52']
+    }
     
     # Feature engineering settings
-    CREATE_INTERACTION_FEATURES = False
+    CREATE_INTERACTION_FEATURES = True
     CREATE_POLYNOMIAL_FEATURES = False
     POLYNOMIAL_DEGREE = 2
-    INTERACTION_TOP_N = 6
+    INTERACTION_TOP_N = 8
     
     # Statistical feature settings
     STATISTICAL_FEATURES = [
         'mean', 'std', 'median', 'min', 'max', 'range',
-        'skew', 'kurtosis', 'q25', 'q75', 'iqr'
+        'skew', 'kurtosis', 'q25', 'q75', 'iqr', 'rms', 'crest_factor'
     ]
     
     # Domain-specific feature settings
     DOMAIN_FEATURES_ENABLED = True
     TIME_SERIES_FEATURES_ENABLED = False
-    PCA_COMPONENTS = 5
+    PCA_COMPONENTS = 6
     
     # Class balancing methods
-    CLASS_BALANCING_METHODS = ['smote', 'borderline', 'adasyn']
-    DEFAULT_BALANCING_METHOD = 'borderline'
+    CLASS_BALANCING_METHODS = ['class_balanced_loss', 'isolation_forest', 'focal_loss']
+    DEFAULT_BALANCING_METHOD = 'class_balanced_loss'
     
     # Neural network parameters
     NN_PARAMS = {
@@ -287,7 +322,7 @@ class Config:
         cls.TARGET_FEATURES = cls.QUICK_FEATURE_COUNT
         cls.CV_FOLDS = 2
         cls.VALIDATION_SIZE = 0.15
-        cls.USE_CLASS_WEIGHTS = False
+        cls.USE_CLASS_BALANCED_LOSS = False
         cls.N_JOBS = 1
         cls.OPTUNA_TRIALS = 10
         cls.OPTUNA_TIMEOUT = 600
@@ -301,6 +336,30 @@ class Config:
         print(f"  Estimators: {cls.QUICK_N_ESTIMATORS}")
     
     @classmethod
+    def get_effective_number_weights(cls, samples_per_class):
+        """Calculate effective number based class weights"""
+        beta = cls.EFFECTIVE_NUMBER_BETA
+        effective_nums = [(1 - np.power(beta, n)) / (1 - beta) for n in samples_per_class]
+        weights = [(1 - beta) / en for en in effective_nums]
+        normalized_weights = np.array(weights) / np.sum(weights) * len(weights)
+        return normalized_weights
+    
+    @classmethod
+    def get_sensor_specific_config(cls, sensor_name):
+        """Get sensor-specific configuration"""
+        for sensor_type, sensors in cls.SENSOR_TYPES.items():
+            if sensor_name in sensors:
+                if sensor_type == 'temperature':
+                    return {'scaler': 'robust', 'outlier_method': 'iqr'}
+                elif sensor_type == 'vibration':
+                    return {'scaler': 'standard', 'outlier_method': 'zscore'}
+                elif sensor_type == 'pressure':
+                    return {'scaler': 'minmax', 'outlier_method': 'isolation'}
+                else:
+                    return {'scaler': 'standard', 'outlier_method': 'iqr'}
+        return {'scaler': 'standard', 'outlier_method': 'iqr'}
+    
+    @classmethod
     def get_model_params(cls, model_name):
         """Return model-specific parameters"""
         params_map = {
@@ -311,7 +370,8 @@ class Config:
             'extra_trees': cls.ET_PARAMS,
             'quick_lightgbm': cls.QUICK_LGBM_PARAMS,
             'neural_network': cls.NN_PARAMS,
-            'gradient_boosting': cls.GB_PARAMS
+            'gradient_boosting': cls.GB_PARAMS,
+            'isolation_forest': cls.ISOLATION_FOREST_PARAMS
         }
         return params_map.get(model_name, {}).copy()
     
@@ -376,31 +436,6 @@ class Config:
         return tuning_spaces.get(model_name, {})
     
     @classmethod
-    def get_feature_engineering_config(cls):
-        """Return feature engineering configuration"""
-        return {
-            'statistical_features': cls.STATISTICAL_FEATURES,
-            'domain_features': cls.DOMAIN_FEATURES_ENABLED,
-            'time_series_features': cls.TIME_SERIES_FEATURES_ENABLED,
-            'interaction_features': cls.CREATE_INTERACTION_FEATURES,
-            'polynomial_features': cls.CREATE_POLYNOMIAL_FEATURES,
-            'pca_components': cls.PCA_COMPONENTS,
-            'interaction_top_n': cls.INTERACTION_TOP_N,
-            'polynomial_degree': cls.POLYNOMIAL_DEGREE
-        }
-    
-    @classmethod
-    def get_class_weight_config(cls):
-        """Return class weight configuration"""
-        return {
-            'use_class_weights': cls.USE_CLASS_WEIGHTS,
-            'focal_alpha': cls.FOCAL_LOSS_ALPHA,
-            'focal_gamma': cls.FOCAL_LOSS_GAMMA,
-            'balancing_methods': cls.CLASS_BALANCING_METHODS,
-            'default_method': cls.DEFAULT_BALANCING_METHOD
-        }
-    
-    @classmethod
     def validate_config(cls):
         """Validate configuration values"""
         errors = []
@@ -422,15 +457,6 @@ class Config:
         if cls.TARGET_FEATURES <= 0:
             errors.append("TARGET_FEATURES must be positive")
         
-        if cls.FOCAL_LOSS_ALPHA <= 0:
-            errors.append("FOCAL_LOSS_ALPHA must be positive")
-        
-        if cls.FOCAL_LOSS_GAMMA <= 0:
-            errors.append("FOCAL_LOSS_GAMMA must be positive")
-        
-        if cls.PCA_COMPONENTS <= 0:
-            errors.append("PCA_COMPONENTS must be positive")
-        
         return errors
     
     @classmethod
@@ -443,21 +469,21 @@ class Config:
         
         if available_memory_gb >= 32:
             cls.N_JOBS = min(cpu_cores, 6)
-            cls.CHUNK_SIZE = 15000
+            cls.CHUNK_SIZE = 8000  # Reduced for memory efficiency
             cls.OPTUNA_TRIALS = 60
             cls.OPTUNA_TIMEOUT = 4500
             cls.TARGET_FEATURES = 38
             cls.PCA_COMPONENTS = 6
         elif available_memory_gb >= 16:
             cls.N_JOBS = min(cpu_cores, 6)
-            cls.CHUNK_SIZE = 12000
+            cls.CHUNK_SIZE = 6000
             cls.OPTUNA_TRIALS = 50
             cls.OPTUNA_TIMEOUT = 3600
             cls.TARGET_FEATURES = 35
             cls.PCA_COMPONENTS = 5
         else:
             cls.N_JOBS = min(cpu_cores, 4)
-            cls.CHUNK_SIZE = 8000
+            cls.CHUNK_SIZE = 4000
             cls.OPTUNA_TRIALS = 30
             cls.OPTUNA_TIMEOUT = 2400
             cls.TARGET_FEATURES = 30
@@ -475,98 +501,10 @@ class Config:
     def get_performance_targets(cls):
         """Return performance targets and thresholds"""
         return {
-            'target_macro_f1': 0.83,
-            'deployment_threshold': 0.75,
-            'good_performance': 0.70,
-            'acceptable_performance': 0.65,
-            'class_performance_threshold': cls.CLASS_PERFORMANCE_THRESHOLD,
+            'target_macro_f1': 0.84,
+            'deployment_threshold': 0.80,
+            'good_performance': 0.75,
+            'acceptable_performance': 0.70,
             'stability_weight': 0.8,
             'confidence_threshold': 0.7
-        }
-    
-    @classmethod
-    def get_optimization_config(cls):
-        """Return optimization configuration"""
-        return {
-            'optuna_trials': cls.OPTUNA_TRIALS,
-            'optuna_timeout': cls.OPTUNA_TIMEOUT,
-            'optuna_cv_folds': cls.OPTUNA_CV_FOLDS,
-            'early_stopping_patience': 100,
-            'validation_size': cls.VALIDATION_SIZE,
-            'cv_folds': cls.CV_FOLDS
-        }
-    
-    @classmethod
-    def update_ensemble_weights(cls, performance_scores):
-        """Update ensemble weights based on performance"""
-        if not performance_scores:
-            return
-        
-        total_score = sum(performance_scores.values())
-        
-        for model_name in cls.ENSEMBLE_WEIGHTS:
-            if model_name in performance_scores:
-                cls.ENSEMBLE_WEIGHTS[model_name] = performance_scores[model_name] / total_score
-        
-        # Normalize weights
-        total_weight = sum(cls.ENSEMBLE_WEIGHTS.values())
-        if total_weight > 0:
-            for model_name in cls.ENSEMBLE_WEIGHTS:
-                cls.ENSEMBLE_WEIGHTS[model_name] /= total_weight
-    
-    @classmethod
-    def setup_production_mode(cls):
-        """Setup configuration for production deployment"""
-        cls.MEMORY_EFFICIENT = True
-        cls.CHUNK_SIZE = 5000
-        cls.N_JOBS = min(cls.N_JOBS, 4)
-        cls.OPTUNA_TRIALS = 20
-        cls.OPTUNA_TIMEOUT = 1800
-        
-        # Use conservative parameters for stability
-        cls.LGBM_PARAMS['n_estimators'] = min(cls.LGBM_PARAMS['n_estimators'], 800)
-        cls.XGB_PARAMS['n_estimators'] = min(cls.XGB_PARAMS['n_estimators'], 800)
-        cls.CAT_PARAMS['iterations'] = min(cls.CAT_PARAMS['iterations'], 800)
-        
-        print("Production mode configured for stability and efficiency")
-    
-    @classmethod
-    def get_data_processing_config(cls):
-        """Return data processing configuration"""
-        return {
-            'scaling_method': cls.SCALING_METHOD,
-            'feature_selection_methods': cls.FEATURE_SELECTION_METHODS,
-            'target_features': cls.TARGET_FEATURES,
-            'chunk_size': cls.CHUNK_SIZE,
-            'memory_efficient': cls.MEMORY_EFFICIENT,
-            'validation_strategy': cls.VALIDATION_STRATEGY
-        }
-    
-    @classmethod
-    def setup_fast_mode(cls):
-        """Setup fast execution mode configuration"""
-        cls.CV_FOLDS = 5
-        cls.OPTUNA_TRIALS = 30
-        cls.OPTUNA_TIMEOUT = 2400
-        cls.OPTUNA_CV_FOLDS = 4
-        
-        # Reduce model complexity
-        cls.LGBM_PARAMS['n_estimators'] = 800
-        cls.XGB_PARAMS['n_estimators'] = 800
-        cls.CAT_PARAMS['iterations'] = 800
-        cls.RF_PARAMS['n_estimators'] = 400
-        cls.ET_PARAMS['n_estimators'] = 350
-        cls.GB_PARAMS['n_estimators'] = 250
-        
-        print("Fast mode configured for reduced execution time")
-    
-    @classmethod
-    def get_performance_config(cls):
-        """Get performance configuration"""
-        return {
-            'cv_folds': cls.CV_FOLDS,
-            'optuna_trials': cls.OPTUNA_TRIALS,
-            'optuna_timeout': cls.OPTUNA_TIMEOUT,
-            'target_features': cls.TARGET_FEATURES,
-            'n_jobs': cls.N_JOBS
         }
