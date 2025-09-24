@@ -43,7 +43,7 @@ def setup_logging(log_file=None, level='INFO'):
     return logging.getLogger(__name__)
 
 def load_data(file_path, chunk_size=None):
-    """Memory-efficient data loading"""
+    """Memory-efficient data loading with optimization"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
@@ -53,38 +53,50 @@ def load_data(file_path, chunk_size=None):
         
         file_size_mb = file_path.stat().st_size / (1024 * 1024)
         
-        if chunk_size and file_size_mb > 100:
+        if chunk_size and file_size_mb > 200:
             chunks = []
+            chunk_count = 0
             for chunk in pd.read_csv(file_path, chunksize=chunk_size):
+                # Optimize data types during loading
+                chunk = optimize_dataframe_memory(chunk)
                 chunks.append(chunk)
+                chunk_count += 1
+                
+                # Memory management for large files
+                if chunk_count % 10 == 0:
+                    gc.collect()
+            
             data = pd.concat(chunks, ignore_index=True)
             del chunks
             gc.collect()
         else:
             data = pd.read_csv(file_path)
+            data = optimize_dataframe_memory(data)
         
+        print(f"Data loaded: {data.shape}, memory: {data.memory_usage(deep=True).sum() / 1024 / 1024:.1f}MB")
         return data
+        
     except Exception as e:
         raise Exception(f"Data loading failed: {e}")
 
 def save_model(model, file_path):
-    """Save model"""
+    """Save model with compression"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
         
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Try joblib first
+        # Try joblib with high compression first
         try:
-            joblib.dump(model, file_path, compress=3)
+            joblib.dump(model, file_path, compress=9)
             file_size_mb = file_path.stat().st_size / (1024 * 1024)
             print(f"Model saved successfully (joblib): {file_path} ({file_size_mb:.1f}MB)")
             return
         except Exception as joblib_error:
             print(f"joblib save failed: {joblib_error}")
         
-        # Try pickle
+        # Try pickle as fallback
         try:
             with open(file_path, 'wb') as f:
                 pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -101,7 +113,7 @@ def save_model(model, file_path):
         raise
 
 def load_model(file_path):
-    """Load model"""
+    """Load model with error handling"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
@@ -131,8 +143,8 @@ def load_model(file_path):
     except Exception as e:
         raise Exception(f"Model loading failed: {e}")
 
-def save_joblib(obj, file_path, compress=3):
-    """Save object using joblib"""
+def save_joblib(obj, file_path, compress=9):
+    """Save object using joblib with high compression"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
@@ -165,7 +177,7 @@ def load_joblib(file_path):
         raise Exception(f"Object loading failed: {e}")
 
 def calculate_macro_f1(y_true, y_pred):
-    """Calculate Macro F1 score"""
+    """Calculate Macro F1 score with zero division handling"""
     return f1_score(y_true, y_pred, average='macro', zero_division=0)
 
 def calculate_weighted_f1(y_true, y_pred):
@@ -173,7 +185,7 @@ def calculate_weighted_f1(y_true, y_pred):
     return f1_score(y_true, y_pred, average='weighted', zero_division=0)
 
 def calculate_all_metrics(y_true, y_pred):
-    """Calculate all evaluation metrics"""
+    """Calculate all evaluation metrics with stability measures"""
     from sklearn.metrics import precision_score, recall_score
     
     try:
@@ -198,29 +210,24 @@ def calculate_all_metrics(y_true, y_pred):
             metrics['f1_max'] = np.max(valid_scores)
             metrics['f1_range'] = metrics['f1_max'] - metrics['f1_min']
             metrics['low_performance_classes'] = np.sum(class_f1_scores < 0.5)
+            
+            # Stability metrics
+            metrics['f1_cv'] = metrics['f1_std'] / metrics['macro_f1'] if metrics['macro_f1'] > 0 else 0
+            metrics['balanced_accuracy'] = np.mean(class_f1_scores)
         
     except Exception as e:
         print(f"Error calculating metrics: {e}")
         metrics = {
-            'accuracy': 0.0,
-            'macro_f1': 0.0,
-            'weighted_f1': 0.0,
-            'micro_f1': 0.0,
-            'macro_precision': 0.0,
-            'macro_recall': 0.0,
-            'weighted_precision': 0.0,
-            'weighted_recall': 0.0,
-            'f1_std': 0.0,
-            'f1_min': 0.0,
-            'f1_max': 0.0,
-            'f1_range': 0.0,
-            'low_performance_classes': 0
+            'accuracy': 0.0, 'macro_f1': 0.0, 'weighted_f1': 0.0, 'micro_f1': 0.0,
+            'macro_precision': 0.0, 'macro_recall': 0.0, 'weighted_precision': 0.0, 
+            'weighted_recall': 0.0, 'f1_std': 0.0, 'f1_min': 0.0, 'f1_max': 0.0,
+            'f1_range': 0.0, 'low_performance_classes': 0, 'f1_cv': 0.0, 'balanced_accuracy': 0.0
         }
     
     return metrics
 
 def calculate_class_metrics(y_true, y_pred, labels=None):
-    """Calculate class-wise metrics"""
+    """Calculate class-wise metrics with support analysis"""
     try:
         if labels is None:
             labels = sorted(list(set(y_true) | set(y_pred)))
@@ -267,17 +274,21 @@ def calculate_stability_metrics(cv_scores_dict):
             # Range of scores
             score_range = np.max(cv_scores) - np.min(cv_scores)
             
+            # Stability index (lower is more stable)
+            stability_index = cv_stability + (score_range / mean_score if mean_score > 0 else 0)
+            
             stability_metrics[model_name] = {
                 'cv_stability': cv_stability,
                 'confidence_interval': confidence_interval,
                 'score_range': score_range,
-                'confidence_width': confidence_interval[1] - confidence_interval[0]
+                'confidence_width': confidence_interval[1] - confidence_interval[0],
+                'stability_index': stability_index
             }
     
     return stability_metrics
 
 def print_classification_metrics(y_true, y_pred, class_names=None, target_names=None):
-    """Print classification performance metrics"""
+    """Print classification performance metrics with detailed analysis"""
     try:
         metrics = calculate_all_metrics(y_true, y_pred)
         
@@ -286,6 +297,18 @@ def print_classification_metrics(y_true, y_pred, class_names=None, target_names=
         for metric_name, value in metrics.items():
             if isinstance(value, (int, float)):
                 print(f"{metric_name:20s}: {value:.4f}")
+        
+        # Class imbalance analysis
+        class_counts = Counter(y_true)
+        pred_counts = Counter(y_pred)
+        
+        print(f"\nClass Distribution Analysis:")
+        print(f"True classes: {len(class_counts)}, Predicted classes: {len(pred_counts)}")
+        
+        # Missing predictions
+        missing_classes = set(class_counts.keys()) - set(pred_counts.keys())
+        if missing_classes:
+            print(f"Classes not predicted: {sorted(missing_classes)}")
         
         if target_names is None and class_names is not None:
             target_names = [str(c) for c in class_names]
@@ -311,10 +334,28 @@ def print_classification_metrics(y_true, y_pred, class_names=None, target_names=
         return 0.0
 
 def create_cv_folds(X, y, n_splits=5, random_state=42):
-    """Create cross-validation folds"""
+    """Create stratified cross-validation folds with balance check"""
     try:
+        # Check class distribution
+        class_counts = Counter(y)
+        min_samples = min(class_counts.values())
+        
+        if min_samples < n_splits:
+            print(f"Warning: Minimum class samples ({min_samples}) < n_splits ({n_splits})")
+            n_splits = max(2, min_samples)
+            print(f"Adjusted n_splits to {n_splits}")
+        
         skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-        return list(skf.split(X, y))
+        folds = list(skf.split(X, y))
+        
+        # Validate fold quality
+        for i, (train_idx, val_idx) in enumerate(folds):
+            train_classes = len(set(y[train_idx]))
+            val_classes = len(set(y[val_idx]))
+            print(f"Fold {i+1}: train classes={train_classes}, val classes={val_classes}")
+        
+        return folds
+        
     except Exception as e:
         print(f"CV fold creation failed: {e}")
         from sklearn.model_selection import train_test_split
@@ -328,7 +369,7 @@ def create_cv_folds(X, y, n_splits=5, random_state=42):
         return folds
 
 def calculate_class_weights(y, method='balanced'):
-    """Calculate class weights"""
+    """Calculate class weights with multiple methods"""
     try:
         if method == 'balanced':
             unique_classes = np.unique(y)
@@ -348,6 +389,13 @@ def calculate_class_weights(y, method='balanced'):
             for class_label, count in class_counts.items():
                 weights[class_label] = np.sqrt(total_samples / count)
             return weights
+        elif method == 'log_inv_freq':
+            class_counts = Counter(y)
+            total_samples = len(y)
+            weights = {}
+            for class_label, count in class_counts.items():
+                weights[class_label] = np.log(total_samples / count + 1)
+            return weights
         else:
             return None
     except Exception as e:
@@ -355,25 +403,42 @@ def calculate_class_weights(y, method='balanced'):
         return None
 
 def detect_outliers_iqr(data, multiplier=1.5):
-    """Detect outliers using IQR method"""
-    Q1 = np.percentile(data, 25)
-    Q3 = np.percentile(data, 75)
-    IQR = Q3 - Q1
-    
-    lower_bound = Q1 - multiplier * IQR
-    upper_bound = Q3 + multiplier * IQR
-    
-    outliers = (data < lower_bound) | (data > upper_bound)
-    return outliers
+    """Detect outliers using IQR method with robust handling"""
+    try:
+        Q1 = np.percentile(data, 25)
+        Q3 = np.percentile(data, 75)
+        IQR = Q3 - Q1
+        
+        if IQR == 0:  # Handle case where IQR is 0
+            return np.zeros(len(data), dtype=bool)
+        
+        lower_bound = Q1 - multiplier * IQR
+        upper_bound = Q3 + multiplier * IQR
+        
+        outliers = (data < lower_bound) | (data > upper_bound)
+        return outliers
+    except Exception as e:
+        print(f"IQR outlier detection failed: {e}")
+        return np.zeros(len(data), dtype=bool)
 
 def detect_outliers_zscore(data, threshold=3):
-    """Detect outliers using Z-score method"""
-    z_scores = np.abs(zscore(data))
-    outliers = z_scores > threshold
-    return outliers
+    """Detect outliers using Z-score method with robust handling"""
+    try:
+        if np.std(data) == 0:  # Handle constant data
+            return np.zeros(len(data), dtype=bool)
+            
+        z_scores = np.abs(zscore(data, nan_policy='omit'))
+        outliers = z_scores > threshold
+        
+        # Handle NaN values
+        outliers = np.nan_to_num(outliers, nan=False)
+        return outliers.astype(bool)
+    except Exception as e:
+        print(f"Z-score outlier detection failed: {e}")
+        return np.zeros(len(data), dtype=bool)
 
 def timer(func):
-    """Function execution time measurement decorator"""
+    """Function execution time measurement decorator with memory tracking"""
     def wrapper(*args, **kwargs):
         start_time = time.time()
         memory_before = memory_usage_check()
@@ -393,8 +458,16 @@ def timer(func):
                 seconds = elapsed % 60
                 print(f"{func.__name__} execution time: {minutes}m {seconds:.2f}s")
             
-            if memory_increase > 50:  # Display if increase > 50MB
+            if memory_increase > 100:  # Display if increase > 100MB
                 print(f"Memory increase: {memory_increase:.1f}MB")
+            
+            # Automatic garbage collection for large memory usage
+            if memory_increase > 500:
+                gc.collect()
+                memory_final = memory_usage_check()
+                freed = memory_after - memory_final
+                if freed > 10:
+                    print(f"Memory freed by GC: {freed:.1f}MB")
             
             return result
             
@@ -405,7 +478,7 @@ def timer(func):
     return wrapper
 
 def check_data_quality(df, feature_columns):
-    """Data quality check"""
+    """Data quality check with sensor-specific validation"""
     try:
         print("Data quality check")
         print(f"Data shape: {df.shape}")
@@ -440,6 +513,38 @@ def check_data_quality(df, feature_columns):
             for col, count in sorted_inf[:5]:
                 print(f"  {col}: {count} ({count/len(df)*100:.2f}%)")
         
+        # Sensor-specific quality checks
+        sensor_quality_issues = 0
+        
+        # Check for sensors with zero variance
+        zero_var_sensors = []
+        for col in numeric_cols:
+            if df[col].std() == 0:
+                zero_var_sensors.append(col)
+                sensor_quality_issues += 1
+        
+        if zero_var_sensors:
+            print(f"Zero variance sensors: {len(zero_var_sensors)}")
+        
+        # Check for highly correlated sensor pairs (potential redundancy)
+        if len(numeric_cols) >= 2:
+            try:
+                corr_matrix = df[numeric_cols].corr()
+                high_corr_pairs = []
+                
+                for i in range(len(numeric_cols)):
+                    for j in range(i+1, len(numeric_cols)):
+                        corr_val = abs(corr_matrix.iloc[i, j])
+                        if corr_val > 0.98:  # Very high correlation threshold
+                            high_corr_pairs.append((numeric_cols[i], numeric_cols[j], corr_val))
+                            sensor_quality_issues += 1
+                
+                if high_corr_pairs:
+                    print(f"Highly correlated sensor pairs (>0.98): {len(high_corr_pairs)}")
+                    
+            except Exception as e:
+                print(f"Correlation analysis failed: {e}")
+        
         # Check data types
         print(f"\nData types:")
         dtype_counts = df[feature_columns].dtypes.value_counts()
@@ -454,58 +559,47 @@ def check_data_quality(df, feature_columns):
             print(f"  Std range: {stats_df.loc['std'].min():.4f} ~ {stats_df.loc['std'].max():.4f}")
             print(f"  Min value: {stats_df.loc['min'].min():.4f}")
             print(f"  Max value: {stats_df.loc['max'].max():.4f}")
-            
-            # Check for potential data leakage patterns
-            zero_variance_cols = []
-            high_correlation_pairs = []
-            
-            for col in numeric_cols[:10]:  # Check first 10 columns only
-                if df[col].std() == 0:
-                    zero_variance_cols.append(col)
-            
-            if zero_variance_cols:
-                print(f"  Zero variance columns: {len(zero_variance_cols)}")
-            
-            # Check correlation matrix for potential issues
-            if len(numeric_cols) >= 2:
-                try:
-                    corr_matrix = df[numeric_cols].corr()
-                    high_corr_count = (np.abs(corr_matrix) > 0.95).sum().sum() - len(numeric_cols)
-                    if high_corr_count > 0:
-                        print(f"  High correlation pairs (>0.95): {high_corr_count // 2}")
-                except Exception as e:
-                    print(f"  Correlation analysis failed: {e}")
         
         # Memory usage
         memory_mb = df.memory_usage(deep=True).sum() / 1024 / 1024
         print(f"Memory usage: {memory_mb:.2f} MB")
         
-        # Data quality score
+        # Overall quality score
         quality_score = 1.0
         if total_missing > 0:
             quality_score -= min(0.3, total_missing / (len(df) * len(feature_columns)))
         if total_inf > 0:
             quality_score -= min(0.2, total_inf / (len(df) * len(feature_columns)))
+        if sensor_quality_issues > 0:
+            quality_score -= min(0.2, sensor_quality_issues / len(feature_columns))
         
         print(f"Data quality score: {quality_score:.3f}")
         
-        return total_missing == 0 and total_inf == 0
+        return total_missing == 0 and total_inf == 0 and sensor_quality_issues < 5
         
     except Exception as e:
         print(f"Error during data quality check: {e}")
         return False
 
 def memory_usage_check():
-    """Check memory usage"""
+    """Check memory usage with system information"""
     try:
         process = psutil.Process()
         memory_mb = process.memory_info().rss / 1024 / 1024
+        
+        # Get system memory info
+        system_memory = psutil.virtual_memory()
+        available_gb = system_memory.available / (1024 ** 3)
+        
+        if memory_mb > 2000:  # > 2GB
+            print(f"High memory usage: {memory_mb:.1f}MB (Available: {available_gb:.1f}GB)")
+        
         return memory_mb
     except Exception:
         return 0
 
 def save_results(results, file_path):
-    """Save results to CSV file"""
+    """Save results to CSV file with error handling"""
     try:
         if isinstance(file_path, str):
             file_path = Path(file_path)
@@ -519,13 +613,17 @@ def save_results(results, file_path):
         else:
             df = results
         
+        # Optimize before saving
+        df = optimize_dataframe_memory(df)
+        
         df.to_csv(file_path, index=False, encoding='utf-8')
         print(f"Results saved successfully: {file_path}")
+        
     except Exception as e:
         print(f"Results save failed: {e}")
 
 def validate_predictions(y_pred, n_classes, sample_ids=None):
-    """Validate prediction results"""
+    """Validate prediction results with detailed analysis"""
     try:
         print("Prediction validation")
         
@@ -551,7 +649,7 @@ def validate_predictions(y_pred, n_classes, sample_ids=None):
             print(f"Warning: Predictions outside valid range (0 ~ {n_classes-1})")
             is_valid = False
         
-        # Distribution check
+        # Distribution analysis
         unique, counts = np.unique(y_pred, return_counts=True)
         print(f"\nPrediction distribution (top 15):")
         
@@ -582,7 +680,7 @@ def validate_predictions(y_pred, n_classes, sample_ids=None):
                 print(f"Missing classes: {missing_list[:10]} ... (total {len(missing_list)})")
             is_valid = False
         
-        # Distribution entropy (measure of uniformity)
+        # Distribution metrics
         probs = counts / len(y_pred)
         entropy = -np.sum(probs * np.log(probs + 1e-10))
         max_entropy = np.log(n_classes)
@@ -590,13 +688,18 @@ def validate_predictions(y_pred, n_classes, sample_ids=None):
         
         print(f"Distribution entropy: {normalized_entropy:.3f} (1.0 = uniform)")
         
-        # Gini coefficient (measure of inequality)
-        sorted_counts = np.sort(counts)
-        n = len(sorted_counts)
-        cumsum = np.cumsum(sorted_counts)
-        gini = (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
+        # Class imbalance metrics
+        imbalance_ratio = np.max(counts) / np.max([np.min(counts), 1])
+        print(f"Imbalance ratio: {imbalance_ratio:.2f}:1")
         
-        print(f"Distribution Gini coefficient: {gini:.3f} (0.0 = uniform)")
+        # Quality assessment
+        if normalized_entropy < 0.8:
+            print("Warning: Low distribution entropy indicates potential bias")
+            is_valid = False
+            
+        if imbalance_ratio > 50:
+            print("Warning: Extreme class imbalance detected")
+            is_valid = False
         
         return is_valid
         
@@ -605,8 +708,12 @@ def validate_predictions(y_pred, n_classes, sample_ids=None):
         return False
 
 def create_submission_template(test_ids, predictions, id_col='ID', target_col='target'):
-    """Create submission file template"""
+    """Create submission file template with validation"""
     try:
+        # Validate inputs
+        if len(test_ids) != len(predictions):
+            raise ValueError(f"Length mismatch: IDs({len(test_ids)}) vs Predictions({len(predictions)})")
+        
         submission = pd.DataFrame({
             id_col: test_ids,
             target_col: predictions
@@ -615,13 +722,23 @@ def create_submission_template(test_ids, predictions, id_col='ID', target_col='t
         # Data type optimization
         submission[target_col] = submission[target_col].astype('int16')
         
+        # Validate submission format
+        if submission[id_col].duplicated().any():
+            print("Warning: Duplicate IDs found in submission")
+        
+        if submission[target_col].isnull().any():
+            print("Warning: Null predictions found in submission")
+            submission[target_col].fillna(0, inplace=True)
+        
+        print(f"Submission template created: {submission.shape}")
         return submission
+        
     except Exception as e:
         print(f"Submission file template creation failed: {e}")
         return None
 
 def analyze_class_distribution(y, class_names=None):
-    """Analyze class distribution"""
+    """Analyze class distribution with statistical measures"""
     try:
         print("Class distribution analysis")
         
@@ -645,15 +762,14 @@ def analyze_class_distribution(y, class_names=None):
                 'percentage': percentage
             })
             
-            if class_id < 10:  # Display top 10 only
+            if class_id < 15:  # Display top 15 only
                 print(f"  {class_name:>12}: {count:5d} ({percentage:5.2f}%)")
         
-        # Calculate imbalance degree
+        # Statistical measures
         max_count = max(counts)
         min_count = min(counts[counts > 0]) if np.any(counts > 0) else 1
         imbalance_ratio = max_count / min_count
         
-        # Statistical measures
         mean_count = np.mean(counts)
         std_count = np.std(counts)
         cv_count = std_count / mean_count if mean_count > 0 else float('inf')
@@ -666,10 +782,16 @@ def analyze_class_distribution(y, class_names=None):
         print(f"  Coefficient of variation: {cv_count:.3f}")
         print(f"  Imbalance ratio: {imbalance_ratio:.2f}:1")
         
-        # Effective number of classes (Renyi entropy based measure)
+        # Effective number of classes (Simpson's diversity index)
         probs = counts / total_samples
         effective_classes = 1 / np.sum(probs ** 2)
         print(f"  Effective number of classes: {effective_classes:.1f}")
+        
+        # Shannon diversity index
+        shannon_diversity = -np.sum(probs * np.log(probs + 1e-10))
+        max_shannon = np.log(len(unique))
+        normalized_shannon = shannon_diversity / max_shannon
+        print(f"  Shannon diversity index: {normalized_shannon:.3f}")
         
         return distribution_data
         
@@ -678,11 +800,15 @@ def analyze_class_distribution(y, class_names=None):
         return []
 
 def garbage_collect():
-    """Perform garbage collection"""
+    """Perform garbage collection with memory reporting"""
     try:
+        memory_before = memory_usage_check()
         collected = gc.collect()
+        memory_after = memory_usage_check()
+        memory_freed = memory_before - memory_after
+        
         if collected > 0:
-            print(f"Memory cleanup: {collected} objects released")
+            print(f"Memory cleanup: {collected} objects released, {memory_freed:.1f}MB freed")
         return collected
     except Exception as e:
         print(f"Error during garbage collection: {e}")
@@ -706,7 +832,7 @@ def format_time(seconds):
         return f"{seconds} seconds"
 
 def safe_divide(numerator, denominator, default=0.0):
-    """Safe division"""
+    """Safe division with default value"""
     try:
         if denominator == 0:
             return default
@@ -715,7 +841,7 @@ def safe_divide(numerator, denominator, default=0.0):
         return default
 
 def check_system_resources():
-    """Check system resources"""
+    """Check system resources with recommendations"""
     try:
         # CPU information
         cpu_count = os.cpu_count()
@@ -737,6 +863,14 @@ def check_system_resources():
         print(f"  Memory: {memory_available_gb:.1f}GB available / {memory_total_gb:.1f}GB total ({memory_usage_percent:.1f}% used)")
         print(f"  Disk: {disk_free_gb:.1f}GB free / {disk_total_gb:.1f}GB total")
         
+        # Resource recommendations
+        if memory_usage_percent > 85:
+            print("  Warning: High memory usage detected")
+        if cpu_usage > 90:
+            print("  Warning: High CPU usage detected")
+        if disk_free_gb < 5:
+            print("  Warning: Low disk space available")
+        
         return {
             'cpu_count': cpu_count,
             'cpu_usage': cpu_usage,
@@ -752,7 +886,7 @@ def check_system_resources():
         return None
 
 def optimize_dataframe_memory(df):
-    """Optimize DataFrame memory usage"""
+    """Optimize DataFrame memory usage with smart type conversion"""
     try:
         initial_memory = df.memory_usage(deep=True).sum() / 1024 / 1024
         
@@ -773,15 +907,21 @@ def optimize_dataframe_memory(df):
                     elif c_min > np.iinfo(np.int64).min and c_max < np.iinfo(np.int64).max:
                         df[col] = df[col].astype(np.int64)
                 else:
-                    if c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
-                        df[col] = df[col].astype(np.float32)
+                    # For float types, be more conservative with precision requirements
+                    if col.startswith(('X_', 'sensor_', 'pca_')):  # Sensor data needs precision
+                        if c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
+                            df[col] = df[col].astype(np.float32)
+                        else:
+                            df[col] = df[col].astype(np.float64)
                     else:
-                        df[col] = df[col].astype(np.float64)
+                        # Non-sensor data can use float32
+                        df[col] = df[col].astype(np.float32)
         
         final_memory = df.memory_usage(deep=True).sum() / 1024 / 1024
         memory_reduction = (initial_memory - final_memory) / initial_memory * 100
         
-        print(f"Memory usage reduction: {initial_memory:.1f}MB -> {final_memory:.1f}MB ({memory_reduction:.1f}% reduction)")
+        if memory_reduction > 5:  # Only report significant reductions
+            print(f"Memory usage reduction: {initial_memory:.1f}MB -> {final_memory:.1f}MB ({memory_reduction:.1f}% reduction)")
         
         return df
         
@@ -790,7 +930,7 @@ def optimize_dataframe_memory(df):
         return df
 
 def validate_data_consistency(train_df, test_df, feature_columns):
-    """Validate training and test data consistency"""
+    """Validate training and test data consistency with sensor analysis"""
     try:
         print("Data consistency validation")
         
@@ -824,10 +964,10 @@ def validate_data_consistency(train_df, test_df, feature_columns):
             for mismatch in type_mismatches:
                 print(f"  {mismatch['feature']}: train={mismatch['train_type']}, test={mismatch['test_type']}")
         
-        # Statistical distribution comparison
+        # Statistical distribution comparison (sensor-specific)
         distribution_differences = []
         
-        for feature in list(common_features)[:10]:  # Check top 10 only
+        for feature in list(common_features)[:15]:  # Check top 15 only
             train_mean = train_df[feature].mean()
             test_mean = test_df[feature].mean()
             train_std = train_df[feature].std()
@@ -836,7 +976,8 @@ def validate_data_consistency(train_df, test_df, feature_columns):
             mean_diff = abs(train_mean - test_mean) / (abs(train_mean) + 1e-8)
             std_diff = abs(train_std - test_std) / (abs(train_std) + 1e-8)
             
-            if mean_diff > 0.1 or std_diff > 0.1:  # >10% difference
+            # More lenient thresholds for sensor data
+            if mean_diff > 0.2 or std_diff > 0.3:
                 distribution_differences.append({
                     'feature': feature,
                     'mean_diff': mean_diff,
@@ -848,8 +989,30 @@ def validate_data_consistency(train_df, test_df, feature_columns):
             for diff in distribution_differences[:5]:
                 print(f"  {diff['feature']}: mean diff {diff['mean_diff']:.3f}, std diff {diff['std_diff']:.3f}")
         
+        # Sensor range consistency check
+        sensor_range_issues = []
+        for feature in common_features:
+            train_range = train_df[feature].max() - train_df[feature].min()
+            test_range = test_df[feature].max() - test_df[feature].min()
+            
+            if train_range > 0 and test_range > 0:
+                range_ratio = abs(train_range - test_range) / train_range
+                if range_ratio > 0.5:  # 50% difference in range
+                    sensor_range_issues.append({
+                        'feature': feature,
+                        'train_range': train_range,
+                        'test_range': test_range,
+                        'ratio': range_ratio
+                    })
+        
+        if sensor_range_issues:
+            print(f"Sensor range inconsistencies: {len(sensor_range_issues)}")
+            for issue in sensor_range_issues[:3]:
+                print(f"  {issue['feature']}: train range {issue['train_range']:.3f}, test range {issue['test_range']:.3f}")
+        
         is_consistent = (len(missing_in_test) == 0 and len(missing_in_train) == 0 and 
-                        len(type_mismatches) == 0 and len(distribution_differences) < 5)
+                        len(type_mismatches) == 0 and len(distribution_differences) < 8 and
+                        len(sensor_range_issues) < 10)
         
         return is_consistent
         
@@ -858,7 +1021,7 @@ def validate_data_consistency(train_df, test_df, feature_columns):
         return False
 
 def calculate_performance_gain(baseline_score, improved_score):
-    """Calculate performance gain metrics"""
+    """Calculate performance gain metrics with target analysis"""
     try:
         absolute_gain = improved_score - baseline_score
         relative_gain = (improved_score - baseline_score) / baseline_score * 100 if baseline_score > 0 else 0
@@ -871,12 +1034,24 @@ def calculate_performance_gain(baseline_score, improved_score):
         gap_to_target = target_score - improved_score
         gap_percentage = gap_to_target / target_score * 100 if target_score > 0 else 0
         
+        # Performance tier assessment
+        if improved_score >= 0.83:
+            tier = "EXCELLENT"
+        elif improved_score >= 0.75:
+            tier = "GOOD"
+        elif improved_score >= 0.65:
+            tier = "FAIR"
+        else:
+            tier = "POOR"
+        
         return {
             'absolute_gain': absolute_gain,
             'relative_gain': relative_gain,
             'target_achievement': target_achievement,
             'gap_to_target': gap_to_target,
-            'gap_percentage': gap_percentage
+            'gap_percentage': gap_percentage,
+            'performance_tier': tier,
+            'needs_improvement': improved_score < target_score
         }
     except Exception as e:
         print(f"Performance gain calculation failed: {e}")

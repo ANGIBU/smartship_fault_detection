@@ -31,20 +31,20 @@ class Config:
     # Model settings
     N_CLASSES = 21
     RANDOM_STATE = 42
-    N_JOBS = 8
+    N_JOBS = 6
     
     # Cross-validation settings
     CV_FOLDS = 7
-    VALIDATION_SIZE = 0.2
+    VALIDATION_SIZE = 0.15
     
     # Feature selection settings
-    FEATURE_SELECTION_METHODS = ['mutual_info', 'f_classif', 'chi2', 'variance']
-    TARGET_FEATURES = 48
+    FEATURE_SELECTION_METHODS = ['mutual_info', 'f_classif', 'recursive']
+    TARGET_FEATURES = 35
     
     # Class weight settings
     USE_CLASS_WEIGHTS = True
-    FOCAL_LOSS_ALPHA = 1.5
-    FOCAL_LOSS_GAMMA = 2.8
+    FOCAL_LOSS_ALPHA = 2.0
+    FOCAL_LOSS_GAMMA = 3.0
     
     # Quick mode settings
     QUICK_MODE = False
@@ -58,29 +58,29 @@ class Config:
         'num_class': N_CLASSES,
         'metric': 'multi_logloss',
         'boosting_type': 'gbdt',
-        'num_leaves': 52,
-        'learning_rate': 0.038,
+        'num_leaves': 48,
+        'learning_rate': 0.035,
         'feature_fraction': 0.82,
-        'bagging_fraction': 0.83,
-        'bagging_freq': 4,
-        'min_child_samples': 12,
-        'min_child_weight': 0.0006,
-        'min_split_gain': 0.018,
-        'reg_alpha': 0.15,
-        'reg_lambda': 0.12,
-        'max_depth': 8,
+        'bagging_fraction': 0.85,
+        'bagging_freq': 3,
+        'min_child_samples': 15,
+        'min_child_weight': 0.001,
+        'min_split_gain': 0.01,
+        'reg_alpha': 0.08,
+        'reg_lambda': 0.15,
+        'max_depth': 7,
         'verbose': -1,
         'random_state': RANDOM_STATE,
-        'n_estimators': 680,
+        'n_estimators': 1200,
         'n_jobs': N_JOBS,
         'class_weight': 'balanced',
-        'subsample': 0.85,
-        'colsample_bytree': 0.88,
-        'min_data_in_leaf': 8,
-        'lambda_l1': 0.1,
-        'lambda_l2': 0.1,
-        'cat_smooth': 10,
-        'max_cat_threshold': 32
+        'subsample': 0.88,
+        'colsample_bytree': 0.82,
+        'min_data_in_leaf': 12,
+        'lambda_l1': 0.05,
+        'lambda_l2': 0.12,
+        'extra_trees': False,
+        'max_bin': 255
     }
     
     # Quick LightGBM parameters
@@ -107,75 +107,78 @@ class Config:
     XGB_PARAMS = {
         'objective': 'multi:softprob',
         'num_class': N_CLASSES,
-        'learning_rate': 0.035,
-        'max_depth': 8,
-        'subsample': 0.84,
+        'learning_rate': 0.032,
+        'max_depth': 6,
+        'subsample': 0.88,
         'colsample_bytree': 0.82,
-        'reg_alpha': 0.12,
-        'reg_lambda': 0.15,
-        'gamma': 0.1,
-        'min_child_weight': 0.6,
+        'reg_alpha': 0.05,
+        'reg_lambda': 0.12,
+        'gamma': 0.05,
+        'min_child_weight': 1.2,
         'random_state': RANDOM_STATE,
-        'n_estimators': 720,
+        'n_estimators': 1200,
         'n_jobs': N_JOBS,
         'tree_method': 'hist',
         'verbosity': 0,
         'eval_metric': 'mlogloss',
-        'scale_pos_weight': 1.3,
-        'max_delta_step': 1,
-        'colsample_bylevel': 0.9,
-        'colsample_bynode': 0.9
+        'scale_pos_weight': 1.0,
+        'max_delta_step': 2,
+        'colsample_bylevel': 0.85,
+        'colsample_bynode': 0.85,
+        'grow_policy': 'depthwise'
     }
     
     # CatBoost parameters
     CAT_PARAMS = {
-        'iterations': 620,
-        'learning_rate': 0.041,
-        'depth': 8,
-        'l2_leaf_reg': 3.2,
-        'border_count': 180,
+        'iterations': 1200,
+        'learning_rate': 0.032,
+        'depth': 6,
+        'l2_leaf_reg': 4.0,
+        'border_count': 200,
         'thread_count': N_JOBS,
         'random_state': RANDOM_STATE,
         'verbose': False,
         'loss_function': 'MultiClass',
         'classes_count': N_CLASSES,
         'auto_class_weights': 'Balanced',
-        'bootstrap_type': 'MVS',
+        'bootstrap_type': 'Bayesian',
         'bagging_temperature': 0.8,
-        'subsample': 0.85,
-        'rsm': 0.88,
-        'random_strength': 0.7,
-        'leaf_estimation_iterations': 5
+        'rsm': 0.82,
+        'random_strength': 0.8,
+        'leaf_estimation_iterations': 8,
+        'od_type': 'Iter',
+        'od_wait': 100
     }
     
     # Random Forest parameters
     RF_PARAMS = {
-        'n_estimators': 460,
-        'max_depth': 14,
-        'min_samples_split': 6,
-        'min_samples_leaf': 2,
-        'max_features': 'sqrt',
-        'random_state': RANDOM_STATE,
-        'n_jobs': N_JOBS,
-        'class_weight': 'balanced',
-        'bootstrap': True,
-        'max_samples': 0.88,
-        'min_weight_fraction_leaf': 0.0,
-        'max_leaf_nodes': None,
-        'min_impurity_decrease': 0.0,
-        'criterion': 'gini'
-    }
-    
-    # Extra Trees parameters
-    ET_PARAMS = {
-        'n_estimators': 380,
-        'max_depth': 12,
+        'n_estimators': 600,
+        'max_depth': 15,
         'min_samples_split': 5,
         'min_samples_leaf': 2,
         'max_features': 'sqrt',
         'random_state': RANDOM_STATE,
         'n_jobs': N_JOBS,
-        'class_weight': 'balanced',
+        'class_weight': 'balanced_subsample',
+        'bootstrap': True,
+        'max_samples': 0.88,
+        'min_weight_fraction_leaf': 0.0,
+        'max_leaf_nodes': None,
+        'min_impurity_decrease': 0.0,
+        'criterion': 'gini',
+        'oob_score': True
+    }
+    
+    # Extra Trees parameters
+    ET_PARAMS = {
+        'n_estimators': 500,
+        'max_depth': 12,
+        'min_samples_split': 4,
+        'min_samples_leaf': 2,
+        'max_features': 'sqrt',
+        'random_state': RANDOM_STATE,
+        'n_jobs': N_JOBS,
+        'class_weight': 'balanced_subsample',
         'bootstrap': False,
         'criterion': 'gini',
         'min_weight_fraction_leaf': 0.0,
@@ -184,16 +187,16 @@ class Config:
     }
     
     # Hyperparameter tuning settings
-    OPTUNA_TRIALS = 45
-    OPTUNA_TIMEOUT = 3000
-    OPTUNA_CV_FOLDS = 3
+    OPTUNA_TRIALS = 50
+    OPTUNA_TIMEOUT = 3600
+    OPTUNA_CV_FOLDS = 5
     
     # Ensemble settings
     ENSEMBLE_WEIGHTS = {
-        'lightgbm': 0.28,
-        'xgboost': 0.34,
-        'catboost': 0.30,
-        'random_forest': 0.08
+        'lightgbm': 0.32,
+        'xgboost': 0.35,
+        'catboost': 0.28,
+        'random_forest': 0.05
     }
     
     # Logging settings
@@ -202,48 +205,46 @@ class Config:
     
     # Memory settings
     MEMORY_EFFICIENT = True
-    CHUNK_SIZE = 12000
+    CHUNK_SIZE = 10000
     
     # Validation strategy settings
     VALIDATION_STRATEGY = 'stratified'
     
     # Class performance threshold
-    CLASS_PERFORMANCE_THRESHOLD = 0.62
+    CLASS_PERFORMANCE_THRESHOLD = 0.65
     
     # Scaling method
-    SCALING_METHOD = 'robust'
+    SCALING_METHOD = 'standard'
     
     # Feature engineering settings
-    CREATE_INTERACTION_FEATURES = True
-    CREATE_POLYNOMIAL_FEATURES = True
+    CREATE_INTERACTION_FEATURES = False
+    CREATE_POLYNOMIAL_FEATURES = False
     POLYNOMIAL_DEGREE = 2
-    INTERACTION_TOP_N = 12
+    INTERACTION_TOP_N = 6
     
     # Statistical feature settings
     STATISTICAL_FEATURES = [
         'mean', 'std', 'median', 'min', 'max', 'range',
-        'skew', 'kurtosis', 'q25', 'q75', 'iqr', 'cv',
-        'outlier_count', 'outlier_ratio', 'zero_count',
-        'negative_count', 'positive_count'
+        'skew', 'kurtosis', 'q25', 'q75', 'iqr'
     ]
     
     # Domain-specific feature settings
     DOMAIN_FEATURES_ENABLED = True
-    TIME_SERIES_FEATURES_ENABLED = True
-    PCA_COMPONENTS = 8
+    TIME_SERIES_FEATURES_ENABLED = False
+    PCA_COMPONENTS = 5
     
     # Class balancing methods
-    CLASS_BALANCING_METHODS = ['smote', 'adasyn', 'smoteenn', 'smotetomek', 'balanced']
-    DEFAULT_BALANCING_METHOD = 'smote'
+    CLASS_BALANCING_METHODS = ['smote', 'borderline', 'adasyn']
+    DEFAULT_BALANCING_METHOD = 'borderline'
     
     # Neural network parameters
     NN_PARAMS = {
-        'hidden_layer_sizes': (128, 64, 32),
+        'hidden_layer_sizes': (256, 128, 64),
         'activation': 'relu',
         'solver': 'adam',
-        'alpha': 0.001,
+        'alpha': 0.0001,
         'batch_size': 'auto',
-        'learning_rate': 'constant',
+        'learning_rate': 'adaptive',
         'learning_rate_init': 0.001,
         'max_iter': 500,
         'random_state': RANDOM_STATE,
@@ -251,24 +252,25 @@ class Config:
         'validation_fraction': 0.1,
         'beta_1': 0.9,
         'beta_2': 0.999,
-        'epsilon': 1e-08
+        'epsilon': 1e-08,
+        'n_iter_no_change': 15
     }
     
     # Gradient Boosting parameters
     GB_PARAMS = {
-        'n_estimators': 320,
-        'learning_rate': 0.042,
+        'n_estimators': 400,
+        'learning_rate': 0.05,
         'max_depth': 7,
-        'subsample': 0.82,
+        'subsample': 0.85,
         'random_state': RANDOM_STATE,
-        'min_samples_split': 6,
+        'min_samples_split': 5,
         'min_samples_leaf': 3,
         'max_features': 'sqrt',
         'min_weight_fraction_leaf': 0.0,
         'max_leaf_nodes': None,
         'min_impurity_decrease': 0.0,
         'validation_fraction': 0.1,
-        'n_iter_no_change': 10,
+        'n_iter_no_change': 12,
         'tol': 1e-4
     }
     
@@ -318,58 +320,56 @@ class Config:
         """Return hyperparameter tuning space for each model"""
         tuning_spaces = {
             'lightgbm': {
-                'num_leaves': (35, 85),
-                'learning_rate': (0.025, 0.08),
-                'feature_fraction': (0.72, 0.95),
-                'bagging_fraction': (0.72, 0.95),
-                'min_child_samples': (8, 32),
-                'reg_alpha': (0.08, 0.3),
-                'reg_lambda': (0.08, 0.3),
-                'max_depth': (6, 10),
-                'n_estimators': (450, 800),
-                'subsample': (0.75, 0.95),
-                'colsample_bytree': (0.75, 0.95),
-                'min_data_in_leaf': (5, 15)
+                'num_leaves': (30, 65),
+                'learning_rate': (0.025, 0.06),
+                'feature_fraction': (0.75, 0.9),
+                'bagging_fraction': (0.8, 0.95),
+                'min_child_samples': (10, 30),
+                'reg_alpha': (0.01, 0.2),
+                'reg_lambda': (0.05, 0.25),
+                'max_depth': (5, 8),
+                'n_estimators': (800, 1500),
+                'subsample': (0.8, 0.95),
+                'colsample_bytree': (0.75, 0.9),
+                'min_data_in_leaf': (5, 20)
             },
             'xgboost': {
-                'learning_rate': (0.025, 0.08),
-                'max_depth': (6, 10),
-                'subsample': (0.75, 0.95),
-                'colsample_bytree': (0.72, 0.95),
-                'reg_alpha': (0.08, 0.25),
-                'reg_lambda': (0.08, 0.3),
-                'gamma': (0.05, 0.2),
-                'min_child_weight': (0.3, 2.5),
-                'n_estimators': (500, 850),
-                'scale_pos_weight': (1.0, 1.8),
-                'max_delta_step': (0, 3),
-                'colsample_bylevel': (0.8, 1.0),
-                'colsample_bynode': (0.8, 1.0)
+                'learning_rate': (0.02, 0.06),
+                'max_depth': (5, 8),
+                'subsample': (0.8, 0.95),
+                'colsample_bytree': (0.75, 0.9),
+                'reg_alpha': (0.01, 0.15),
+                'reg_lambda': (0.05, 0.2),
+                'gamma': (0.01, 0.1),
+                'min_child_weight': (0.8, 2.5),
+                'n_estimators': (800, 1500),
+                'max_delta_step': (1, 3),
+                'colsample_bylevel': (0.75, 0.95),
+                'colsample_bynode': (0.75, 0.95)
             },
             'catboost': {
-                'iterations': (400, 750),
-                'learning_rate': (0.025, 0.08),
-                'depth': (6, 10),
-                'l2_leaf_reg': (1.5, 5.0),
-                'border_count': (100, 220),
+                'iterations': (800, 1500),
+                'learning_rate': (0.02, 0.06),
+                'depth': (5, 8),
+                'l2_leaf_reg': (2.0, 6.0),
+                'border_count': (128, 255),
                 'bagging_temperature': (0.5, 1.5),
-                'subsample': (0.75, 0.95),
                 'rsm': (0.75, 0.95),
                 'random_strength': (0.5, 1.2)
             },
             'random_forest': {
-                'n_estimators': (300, 600),
-                'max_depth': (10, 18),
-                'min_samples_split': (4, 12),
+                'n_estimators': (400, 800),
+                'max_depth': (10, 20),
+                'min_samples_split': (3, 8),
                 'min_samples_leaf': (1, 5),
                 'max_samples': (0.8, 0.95)
             },
             'gradient_boosting': {
-                'n_estimators': (200, 450),
+                'n_estimators': (250, 500),
                 'learning_rate': (0.03, 0.08),
                 'max_depth': (5, 9),
-                'subsample': (0.75, 0.9),
-                'min_samples_split': (4, 10),
+                'subsample': (0.8, 0.95),
+                'min_samples_split': (3, 8),
                 'min_samples_leaf': (2, 6)
             }
         }
@@ -431,18 +431,6 @@ class Config:
         if cls.PCA_COMPONENTS <= 0:
             errors.append("PCA_COMPONENTS must be positive")
         
-        # Validate model parameters
-        for model_name, params in [
-            ('lightgbm', cls.LGBM_PARAMS),
-            ('xgboost', cls.XGB_PARAMS),
-            ('catboost', cls.CAT_PARAMS)
-        ]:
-            if 'n_estimators' in params and params['n_estimators'] <= 0:
-                errors.append(f"{model_name} n_estimators must be positive")
-            
-            if 'learning_rate' in params and (params['learning_rate'] <= 0 or params['learning_rate'] > 1):
-                errors.append(f"{model_name} learning_rate must be between 0 and 1")
-        
         return errors
     
     @classmethod
@@ -454,26 +442,26 @@ class Config:
             return
         
         if available_memory_gb >= 32:
-            cls.N_JOBS = min(cpu_cores, 8)
+            cls.N_JOBS = min(cpu_cores, 6)
             cls.CHUNK_SIZE = 15000
-            cls.OPTUNA_TRIALS = 50
-            cls.OPTUNA_TIMEOUT = 3600
-            cls.TARGET_FEATURES = 52
-            cls.PCA_COMPONENTS = 10
+            cls.OPTUNA_TRIALS = 60
+            cls.OPTUNA_TIMEOUT = 4500
+            cls.TARGET_FEATURES = 38
+            cls.PCA_COMPONENTS = 6
         elif available_memory_gb >= 16:
             cls.N_JOBS = min(cpu_cores, 6)
             cls.CHUNK_SIZE = 12000
-            cls.OPTUNA_TRIALS = 45
-            cls.OPTUNA_TIMEOUT = 3000
-            cls.TARGET_FEATURES = 48
-            cls.PCA_COMPONENTS = 8
+            cls.OPTUNA_TRIALS = 50
+            cls.OPTUNA_TIMEOUT = 3600
+            cls.TARGET_FEATURES = 35
+            cls.PCA_COMPONENTS = 5
         else:
             cls.N_JOBS = min(cpu_cores, 4)
             cls.CHUNK_SIZE = 8000
             cls.OPTUNA_TRIALS = 30
             cls.OPTUNA_TIMEOUT = 2400
-            cls.TARGET_FEATURES = 42
-            cls.PCA_COMPONENTS = 6
+            cls.TARGET_FEATURES = 30
+            cls.PCA_COMPONENTS = 4
         
         # Update model parameters
         for params in [cls.LGBM_PARAMS, cls.XGB_PARAMS, cls.CAT_PARAMS, 
@@ -493,7 +481,7 @@ class Config:
             'acceptable_performance': 0.65,
             'class_performance_threshold': cls.CLASS_PERFORMANCE_THRESHOLD,
             'stability_weight': 0.8,
-            'confidence_threshold': 0.6
+            'confidence_threshold': 0.7
         }
     
     @classmethod
@@ -503,7 +491,7 @@ class Config:
             'optuna_trials': cls.OPTUNA_TRIALS,
             'optuna_timeout': cls.OPTUNA_TIMEOUT,
             'optuna_cv_folds': cls.OPTUNA_CV_FOLDS,
-            'early_stopping_patience': 80,
+            'early_stopping_patience': 100,
             'validation_size': cls.VALIDATION_SIZE,
             'cv_folds': cls.CV_FOLDS
         }
@@ -535,10 +523,10 @@ class Config:
         cls.OPTUNA_TRIALS = 20
         cls.OPTUNA_TIMEOUT = 1800
         
-        # Use more conservative parameters for stability
-        cls.LGBM_PARAMS['n_estimators'] = min(cls.LGBM_PARAMS['n_estimators'], 500)
-        cls.XGB_PARAMS['n_estimators'] = min(cls.XGB_PARAMS['n_estimators'], 500)
-        cls.CAT_PARAMS['iterations'] = min(cls.CAT_PARAMS['iterations'], 500)
+        # Use conservative parameters for stability
+        cls.LGBM_PARAMS['n_estimators'] = min(cls.LGBM_PARAMS['n_estimators'], 800)
+        cls.XGB_PARAMS['n_estimators'] = min(cls.XGB_PARAMS['n_estimators'], 800)
+        cls.CAT_PARAMS['iterations'] = min(cls.CAT_PARAMS['iterations'], 800)
         
         print("Production mode configured for stability and efficiency")
     
@@ -552,4 +540,33 @@ class Config:
             'chunk_size': cls.CHUNK_SIZE,
             'memory_efficient': cls.MEMORY_EFFICIENT,
             'validation_strategy': cls.VALIDATION_STRATEGY
+        }
+    
+    @classmethod
+    def setup_fast_mode(cls):
+        """Setup fast execution mode configuration"""
+        cls.CV_FOLDS = 5
+        cls.OPTUNA_TRIALS = 30
+        cls.OPTUNA_TIMEOUT = 2400
+        cls.OPTUNA_CV_FOLDS = 4
+        
+        # Reduce model complexity
+        cls.LGBM_PARAMS['n_estimators'] = 800
+        cls.XGB_PARAMS['n_estimators'] = 800
+        cls.CAT_PARAMS['iterations'] = 800
+        cls.RF_PARAMS['n_estimators'] = 400
+        cls.ET_PARAMS['n_estimators'] = 350
+        cls.GB_PARAMS['n_estimators'] = 250
+        
+        print("Fast mode configured for reduced execution time")
+    
+    @classmethod
+    def get_performance_config(cls):
+        """Get performance configuration"""
+        return {
+            'cv_folds': cls.CV_FOLDS,
+            'optuna_trials': cls.OPTUNA_TRIALS,
+            'optuna_timeout': cls.OPTUNA_TIMEOUT,
+            'target_features': cls.TARGET_FEATURES,
+            'n_jobs': cls.N_JOBS
         }
