@@ -57,12 +57,10 @@ def load_data(file_path, chunk_size=None):
             chunks = []
             chunk_count = 0
             for chunk in pd.read_csv(file_path, chunksize=chunk_size):
-                # Optimize data types during loading
                 chunk = optimize_dataframe_memory(chunk)
                 chunks.append(chunk)
                 chunk_count += 1
                 
-                # Memory management for large files
                 if chunk_count % 10 == 0:
                     gc.collect()
             
@@ -87,7 +85,6 @@ def save_model(model, file_path):
         
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Try joblib with high compression first
         try:
             joblib.dump(model, file_path, compress=9)
             file_size_mb = file_path.stat().st_size / (1024 * 1024)
@@ -96,7 +93,6 @@ def save_model(model, file_path):
         except Exception as joblib_error:
             print(f"joblib save failed: {joblib_error}")
         
-        # Try pickle as fallback
         try:
             with open(file_path, 'wb') as f:
                 pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -121,7 +117,6 @@ def load_model(file_path):
         if not file_path.exists():
             raise FileNotFoundError(f"Model file not found: {file_path}")
         
-        # Try joblib first
         try:
             model = joblib.load(file_path)
             print(f"Model loaded successfully (joblib): {file_path}")
@@ -129,7 +124,6 @@ def load_model(file_path):
         except:
             pass
         
-        # Try pickle
         try:
             with open(file_path, 'rb') as f:
                 model = pickle.load(f)
@@ -184,8 +178,57 @@ def calculate_weighted_f1(y_true, y_pred):
     """Calculate Weighted F1 score"""
     return f1_score(y_true, y_pred, average='weighted', zero_division=0)
 
+def calculate_class_balanced_f1(y_true, y_pred, class_weights=None):
+    """Calculate class-balanced F1 score"""
+    try:
+        class_f1_scores = f1_score(y_true, y_pred, average=None, zero_division=0)
+        
+        if class_weights is not None:
+            # Weight the F1 scores by class importance
+            weighted_scores = []
+            for class_id, f1 in enumerate(class_f1_scores):
+                weight = class_weights.get(class_id, 1.0)
+                weighted_scores.append(f1 * weight)
+            
+            return np.mean(weighted_scores)
+        else:
+            return np.mean(class_f1_scores)
+    except Exception as e:
+        print(f"Class-balanced F1 calculation failed: {e}")
+        return 0.0
+
+def calculate_effective_number_metrics(y_true, y_pred, beta=0.9999):
+    """Calculate metrics using effective number of samples"""
+    try:
+        # Calculate effective numbers for each class
+        class_counts = Counter(y_true)
+        effective_numbers = {}
+        class_weights = {}
+        
+        for class_id, count in class_counts.items():
+            effective_num = (1 - np.power(beta, count)) / (1 - beta)
+            effective_numbers[class_id] = effective_num
+            class_weights[class_id] = (1 - beta) / effective_num
+        
+        # Normalize weights
+        total_weight = sum(class_weights.values())
+        for class_id in class_weights:
+            class_weights[class_id] = class_weights[class_id] / total_weight * len(class_weights)
+        
+        # Calculate weighted F1
+        weighted_f1 = calculate_class_balanced_f1(y_true, y_pred, class_weights)
+        
+        return {
+            'effective_numbers': effective_numbers,
+            'class_weights': class_weights,
+            'weighted_f1': weighted_f1
+        }
+    except Exception as e:
+        print(f"Effective number metrics calculation failed: {e}")
+        return None
+
 def calculate_all_metrics(y_true, y_pred):
-    """Calculate all evaluation metrics with stability measures"""
+    """Calculate all evaluation metrics with class imbalance considerations"""
     from sklearn.metrics import precision_score, recall_score
     
     try:
@@ -200,7 +243,7 @@ def calculate_all_metrics(y_true, y_pred):
             'weighted_recall': recall_score(y_true, y_pred, average='weighted', zero_division=0)
         }
         
-        # Calculate per-class F1 statistics
+        # Class-specific metrics
         class_f1_scores = f1_score(y_true, y_pred, average=None, zero_division=0)
         valid_scores = class_f1_scores[class_f1_scores > 0]
         
@@ -214,6 +257,17 @@ def calculate_all_metrics(y_true, y_pred):
             # Stability metrics
             metrics['f1_cv'] = metrics['f1_std'] / metrics['macro_f1'] if metrics['macro_f1'] > 0 else 0
             metrics['balanced_accuracy'] = np.mean(class_f1_scores)
+            
+            # Class imbalance metrics
+            class_distribution = Counter(y_true)
+            max_count = max(class_distribution.values())
+            min_count = min([v for v in class_distribution.values() if v > 0])
+            metrics['imbalance_ratio'] = max_count / min_count if min_count > 0 else float('inf')
+            
+            # Effective number based metrics
+            effective_metrics = calculate_effective_number_metrics(y_true, y_pred)
+            if effective_metrics:
+                metrics['effective_weighted_f1'] = effective_metrics['weighted_f1']
         
     except Exception as e:
         print(f"Error calculating metrics: {e}")
@@ -221,10 +275,310 @@ def calculate_all_metrics(y_true, y_pred):
             'accuracy': 0.0, 'macro_f1': 0.0, 'weighted_f1': 0.0, 'micro_f1': 0.0,
             'macro_precision': 0.0, 'macro_recall': 0.0, 'weighted_precision': 0.0, 
             'weighted_recall': 0.0, 'f1_std': 0.0, 'f1_min': 0.0, 'f1_max': 0.0,
-            'f1_range': 0.0, 'low_performance_classes': 0, 'f1_cv': 0.0, 'balanced_accuracy': 0.0
+            'f1_range': 0.0, 'low_performance_classes': 0, 'f1_cv': 0.0, 
+            'balanced_accuracy': 0.0, 'imbalance_ratio': 0.0
         }
     
     return metrics
+
+def analyze_class_imbalance(y_data, n_classes=21):
+    """Analyze class imbalance with multiple metrics"""
+    try:
+        class_counts = Counter(y_data)
+        total_samples = len(y_data)
+        
+        # Basic imbalance metrics
+        max_count = max(class_counts.values())
+        min_count = min([v for v in class_counts.values() if v > 0])
+        imbalance_ratio = max_count / min_count if min_count > 0 else float('inf')
+        
+        # Calculate class frequencies
+        class_frequencies = {}
+        for class_id in range(n_classes):
+            count = class_counts.get(class_id, 0)
+            frequency = count / total_samples
+            class_frequencies[class_id] = {
+                'count': count,
+                'frequency': frequency,
+                'is_minority': count < (total_samples / n_classes) * 0.5
+            }
+        
+        # Shannon entropy for distribution uniformity
+        frequencies = [class_counts.get(i, 0) / total_samples for i in range(n_classes)]
+        entropy = -np.sum([f * np.log(f + 1e-10) for f in frequencies if f > 0])
+        max_entropy = np.log(n_classes)
+        normalized_entropy = entropy / max_entropy
+        
+        # Gini coefficient for inequality
+        sorted_counts = sorted([class_counts.get(i, 0) for i in range(n_classes)])
+        n = len(sorted_counts)
+        cumsum = np.cumsum(sorted_counts)
+        gini = (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n if cumsum[-1] > 0 else 0
+        
+        # Missing classes
+        missing_classes = [i for i in range(n_classes) if class_counts.get(i, 0) == 0]
+        
+        # Effective number of classes (Simpson's diversity index)
+        probs = np.array([class_counts.get(i, 0) for i in range(n_classes)]) / total_samples
+        effective_classes = 1 / np.sum(probs ** 2) if np.sum(probs ** 2) > 0 else 0
+        
+        analysis_results = {
+            'total_samples': total_samples,
+            'n_classes': n_classes,
+            'imbalance_ratio': imbalance_ratio,
+            'normalized_entropy': normalized_entropy,
+            'gini_coefficient': gini,
+            'missing_classes': missing_classes,
+            'effective_classes': effective_classes,
+            'class_frequencies': class_frequencies,
+            'minority_classes': [cid for cid, info in class_frequencies.items() 
+                               if info['is_minority']],
+            'is_severely_imbalanced': imbalance_ratio > 50,
+            'distribution_quality': normalized_entropy * (1 - gini)
+        }
+        
+        return analysis_results
+        
+    except Exception as e:
+        print(f"Class imbalance analysis failed: {e}")
+        return None
+
+def calculate_sensor_data_quality(X_data, feature_columns):
+    """Calculate sensor data quality metrics"""
+    try:
+        quality_metrics = {}
+        
+        for col in feature_columns:
+            if col in X_data.columns:
+                col_data = X_data[col]
+                
+                # Basic statistics
+                col_stats = {
+                    'mean': col_data.mean(),
+                    'std': col_data.std(),
+                    'min': col_data.min(),
+                    'max': col_data.max(),
+                    'range': col_data.max() - col_data.min(),
+                    'missing_rate': col_data.isnull().sum() / len(col_data),
+                    'zero_rate': (col_data == 0).sum() / len(col_data),
+                    'unique_values': col_data.nunique()
+                }
+                
+                # Signal quality metrics
+                if col_stats['std'] > 0:
+                    # Signal-to-noise ratio approximation
+                    col_stats['snr'] = abs(col_stats['mean']) / col_stats['std']
+                    
+                    # Coefficient of variation
+                    col_stats['cv'] = col_stats['std'] / abs(col_stats['mean']) if col_stats['mean'] != 0 else float('inf')
+                else:
+                    col_stats['snr'] = 0
+                    col_stats['cv'] = 0
+                
+                # Outlier detection
+                z_scores = np.abs(zscore(col_data.dropna()))
+                col_stats['outlier_rate'] = (z_scores > 3).sum() / len(z_scores) if len(z_scores) > 0 else 0
+                
+                # Sensor reliability score
+                reliability_score = (1 - col_stats['missing_rate']) * (1 - col_stats['outlier_rate'])
+                if col_stats['unique_values'] > 1:
+                    reliability_score *= min(1.0, col_stats['snr'] / 10)
+                
+                col_stats['reliability_score'] = reliability_score
+                quality_metrics[col] = col_stats
+        
+        # Overall data quality
+        if quality_metrics:
+            reliability_scores = [metrics['reliability_score'] for metrics in quality_metrics.values()]
+            overall_quality = {
+                'mean_reliability': np.mean(reliability_scores),
+                'min_reliability': np.min(reliability_scores),
+                'sensors_high_quality': sum(1 for score in reliability_scores if score > 0.8),
+                'sensors_low_quality': sum(1 for score in reliability_scores if score < 0.5),
+                'total_sensors': len(reliability_scores)
+            }
+            
+            quality_metrics['overall_quality'] = overall_quality
+        
+        return quality_metrics
+        
+    except Exception as e:
+        print(f"Sensor data quality analysis failed: {e}")
+        return None
+
+def calculate_cross_sensor_correlations(X_data, feature_columns, threshold=0.95):
+    """Calculate cross-sensor correlations and identify redundant sensors"""
+    try:
+        correlation_analysis = {}
+        
+        # Calculate correlation matrix
+        corr_matrix = X_data[feature_columns].corr()
+        
+        # Find highly correlated pairs
+        high_correlations = []
+        redundant_sensors = set()
+        
+        for i in range(len(feature_columns)):
+            for j in range(i+1, len(feature_columns)):
+                corr_val = abs(corr_matrix.iloc[i, j])
+                if corr_val > threshold:
+                    high_correlations.append({
+                        'sensor1': feature_columns[i],
+                        'sensor2': feature_columns[j],
+                        'correlation': corr_val
+                    })
+                    redundant_sensors.add(feature_columns[j])  # Mark second sensor as redundant
+        
+        # Sensor importance based on correlations
+        sensor_importance = {}
+        for col in feature_columns:
+            # Calculate average correlation with other sensors
+            col_corrs = [abs(corr_matrix.loc[col, other]) for other in feature_columns if other != col]
+            avg_correlation = np.mean(col_corrs) if col_corrs else 0
+            
+            # Higher average correlation might indicate redundancy
+            sensor_importance[col] = {
+                'avg_correlation': avg_correlation,
+                'max_correlation': max(col_corrs) if col_corrs else 0,
+                'is_redundant': col in redundant_sensors,
+                'unique_information': 1 - avg_correlation  # Approximation
+            }
+        
+        correlation_analysis = {
+            'high_correlations': high_correlations,
+            'redundant_sensors': list(redundant_sensors),
+            'sensor_importance': sensor_importance,
+            'correlation_threshold': threshold,
+            'total_high_correlations': len(high_correlations)
+        }
+        
+        return correlation_analysis
+        
+    except Exception as e:
+        print(f"Cross-sensor correlation analysis failed: {e}")
+        return None
+
+def calculate_uncertainty_metrics(probabilities, predictions):
+    """Calculate various uncertainty metrics for predictions"""
+    try:
+        uncertainties = {}
+        
+        # Shannon entropy
+        entropies = []
+        for probs in probabilities:
+            entropy = -np.sum(probs * np.log(probs + 1e-10))
+            entropies.append(entropy)
+        
+        entropies = np.array(entropies)
+        max_entropy = np.log(len(probabilities[0]))
+        normalized_entropies = entropies / max_entropy
+        
+        # Confidence margin
+        margins = []
+        for probs in probabilities:
+            sorted_probs = sorted(probs, reverse=True)
+            margin = sorted_probs[0] - sorted_probs[1] if len(sorted_probs) > 1 else sorted_probs[0]
+            margins.append(margin)
+        
+        margins = np.array(margins)
+        
+        # Mutual information approximation
+        mutual_info_scores = 1 - normalized_entropies
+        
+        uncertainties = {
+            'shannon_entropy': {
+                'values': entropies,
+                'normalized': normalized_entropies,
+                'mean': np.mean(normalized_entropies),
+                'std': np.std(normalized_entropies)
+            },
+            'confidence_margin': {
+                'values': margins,
+                'mean': np.mean(margins),
+                'std': np.std(margins)
+            },
+            'mutual_information': {
+                'values': mutual_info_scores,
+                'mean': np.mean(mutual_info_scores)
+            },
+            'high_uncertainty_indices': np.where(normalized_entropies > 0.8)[0].tolist(),
+            'low_uncertainty_indices': np.where(normalized_entropies < 0.2)[0].tolist(),
+            'uncertain_prediction_count': np.sum(normalized_entropies > 0.7)
+        }
+        
+        return uncertainties
+        
+    except Exception as e:
+        print(f"Uncertainty metrics calculation failed: {e}")
+        return None
+
+def optimize_temperature_scaling(probabilities, y_true):
+    """Optimize temperature parameter for probability calibration"""
+    try:
+        from scipy.optimize import minimize_scalar
+        from scipy.special import softmax
+        
+        def calibration_loss(temperature):
+            # Apply temperature scaling
+            scaled_logits = np.log(probabilities + 1e-8) / temperature
+            scaled_probs = softmax(scaled_logits, axis=1)
+            
+            # Calculate negative log-likelihood
+            nll = 0
+            for i, true_class in enumerate(y_true):
+                nll -= np.log(scaled_probs[i, true_class] + 1e-8)
+            
+            return nll / len(y_true)
+        
+        # Find optimal temperature
+        result = minimize_scalar(
+            calibration_loss,
+            bounds=(0.1, 5.0),
+            method='bounded'
+        )
+        
+        if result.success:
+            optimal_temp = result.x
+            
+            # Calculate calibration metrics
+            scaled_logits = np.log(probabilities + 1e-8) / optimal_temp
+            calibrated_probs = softmax(scaled_logits, axis=1)
+            
+            # Expected calibration error approximation
+            bin_boundaries = np.linspace(0, 1, 11)
+            bin_lowers = bin_boundaries[:-1]
+            bin_uppers = bin_boundaries[1:]
+            
+            ece = 0
+            for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
+                # Get predictions in this confidence bin
+                max_probs = np.max(calibrated_probs, axis=1)
+                in_bin = (max_probs > bin_lower) & (max_probs <= bin_upper)
+                
+                if np.sum(in_bin) > 0:
+                    bin_accuracy = np.mean(np.argmax(calibrated_probs[in_bin], axis=1) == y_true[in_bin])
+                    bin_confidence = np.mean(max_probs[in_bin])
+                    bin_size = np.sum(in_bin) / len(y_true)
+                    
+                    ece += bin_size * abs(bin_accuracy - bin_confidence)
+            
+            return {
+                'optimal_temperature': optimal_temp,
+                'calibrated_probabilities': calibrated_probs,
+                'expected_calibration_error': ece,
+                'optimization_success': True
+            }
+        else:
+            return {
+                'optimal_temperature': 1.0,
+                'calibrated_probabilities': probabilities,
+                'expected_calibration_error': 1.0,
+                'optimization_success': False
+            }
+    
+    except Exception as e:
+        print(f"Temperature scaling optimization failed: {e}")
+        return None
 
 def calculate_class_metrics(y_true, y_pred, labels=None):
     """Calculate class-wise metrics with support analysis"""
@@ -368,13 +722,29 @@ def create_cv_folds(X, y, n_splits=5, random_state=42):
             folds.append((train_idx, val_idx))
         return folds
 
-def calculate_class_weights(y, method='balanced'):
+def calculate_class_weights(y, method='effective_number', beta=0.9999):
     """Calculate class weights with multiple methods"""
     try:
         if method == 'balanced':
             unique_classes = np.unique(y)
             class_weights = compute_class_weight('balanced', classes=unique_classes, y=y)
             return dict(zip(unique_classes, class_weights))
+        
+        elif method == 'effective_number':
+            class_counts = Counter(y)
+            class_weights = {}
+            
+            for class_label, count in class_counts.items():
+                effective_num = (1 - np.power(beta, count)) / (1 - beta)
+                class_weights[class_label] = (1 - beta) / effective_num
+            
+            # Normalize weights
+            total_weight = sum(class_weights.values())
+            for class_label in class_weights:
+                class_weights[class_label] = class_weights[class_label] / total_weight * len(class_weights)
+            
+            return class_weights
+        
         elif method == 'inverse_freq':
             class_counts = Counter(y)
             total_samples = len(y)
@@ -382,6 +752,7 @@ def calculate_class_weights(y, method='balanced'):
             for class_label, count in class_counts.items():
                 weights[class_label] = total_samples / (len(class_counts) * count)
             return weights
+        
         elif method == 'sqrt_inv_freq':
             class_counts = Counter(y)
             total_samples = len(y)
@@ -389,6 +760,7 @@ def calculate_class_weights(y, method='balanced'):
             for class_label, count in class_counts.items():
                 weights[class_label] = np.sqrt(total_samples / count)
             return weights
+        
         elif method == 'log_inv_freq':
             class_counts = Counter(y)
             total_samples = len(y)
@@ -396,8 +768,10 @@ def calculate_class_weights(y, method='balanced'):
             for class_label, count in class_counts.items():
                 weights[class_label] = np.log(total_samples / count + 1)
             return weights
+        
         else:
             return None
+            
     except Exception as e:
         print(f"Class weight calculation failed: {e}")
         return None
@@ -435,6 +809,22 @@ def detect_outliers_zscore(data, threshold=3):
         return outliers.astype(bool)
     except Exception as e:
         print(f"Z-score outlier detection failed: {e}")
+        return np.zeros(len(data), dtype=bool)
+
+def detect_outliers_isolation_forest(data, contamination=0.1):
+    """Detect outliers using Isolation Forest"""
+    try:
+        from sklearn.ensemble import IsolationForest
+        
+        if len(data.shape) == 1:
+            data = data.reshape(-1, 1)
+        
+        iso_forest = IsolationForest(contamination=contamination, random_state=42)
+        outliers = iso_forest.fit_predict(data) == -1
+        
+        return outliers
+    except Exception as e:
+        print(f"Isolation forest outlier detection failed: {e}")
         return np.zeros(len(data), dtype=bool)
 
 def timer(func):
@@ -526,7 +916,7 @@ def check_data_quality(df, feature_columns):
         if zero_var_sensors:
             print(f"Zero variance sensors: {len(zero_var_sensors)}")
         
-        # Check for highly correlated sensor pairs (potential redundancy)
+        # Check for highly correlated sensor pairs
         if len(numeric_cols) >= 2:
             try:
                 corr_matrix = df[numeric_cols].corr()
@@ -535,7 +925,7 @@ def check_data_quality(df, feature_columns):
                 for i in range(len(numeric_cols)):
                     for j in range(i+1, len(numeric_cols)):
                         corr_val = abs(corr_matrix.iloc[i, j])
-                        if corr_val > 0.98:  # Very high correlation threshold
+                        if corr_val > 0.98:
                             high_corr_pairs.append((numeric_cols[i], numeric_cols[j], corr_val))
                             sensor_quality_issues += 1
                 
@@ -1027,7 +1417,7 @@ def calculate_performance_gain(baseline_score, improved_score):
         relative_gain = (improved_score - baseline_score) / baseline_score * 100 if baseline_score > 0 else 0
         
         # Target achievement percentage
-        target_score = 0.83  # Target macro F1
+        target_score = 0.84  # Target macro F1
         target_achievement = (improved_score / target_score * 100) if target_score > 0 else 0
         
         # Gap to target
@@ -1035,14 +1425,14 @@ def calculate_performance_gain(baseline_score, improved_score):
         gap_percentage = gap_to_target / target_score * 100 if target_score > 0 else 0
         
         # Performance tier assessment
-        if improved_score >= 0.83:
-            tier = "EXCELLENT"
+        if improved_score >= 0.84:
+            tier = "TARGET_ACHIEVED"
         elif improved_score >= 0.75:
             tier = "GOOD"
         elif improved_score >= 0.65:
-            tier = "FAIR"
+            tier = "ACCEPTABLE"
         else:
-            tier = "POOR"
+            tier = "NEEDS_WORK"
         
         return {
             'absolute_gain': absolute_gain,
@@ -1055,4 +1445,44 @@ def calculate_performance_gain(baseline_score, improved_score):
         }
     except Exception as e:
         print(f"Performance gain calculation failed: {e}")
+        return None
+
+def calculate_sensor_stability_index(X_data, feature_columns, window_size=100):
+    """Calculate sensor stability index over time windows"""
+    try:
+        stability_indices = {}
+        
+        for col in feature_columns:
+            if col in X_data.columns:
+                col_data = X_data[col].values
+                
+                if len(col_data) >= window_size * 2:
+                    # Calculate variance across sliding windows
+                    window_variances = []
+                    for i in range(0, len(col_data) - window_size, window_size // 2):
+                        window_data = col_data[i:i+window_size]
+                        window_var = np.var(window_data)
+                        window_variances.append(window_var)
+                    
+                    # Stability is inverse of variance of variances
+                    if len(window_variances) > 1:
+                        stability = 1 / (1 + np.var(window_variances))
+                    else:
+                        stability = 1.0
+                else:
+                    # For short sequences, use coefficient of variation
+                    cv = np.std(col_data) / (abs(np.mean(col_data)) + 1e-8)
+                    stability = 1 / (1 + cv)
+                
+                stability_indices[col] = stability
+        
+        # Overall system stability
+        if stability_indices:
+            overall_stability = np.mean(list(stability_indices.values()))
+            stability_indices['overall'] = overall_stability
+        
+        return stability_indices
+        
+    except Exception as e:
+        print(f"Sensor stability calculation failed: {e}")
         return None
